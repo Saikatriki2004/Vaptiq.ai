@@ -11,7 +11,7 @@ class DatabaseLogger:
     def __init__(self, scan_id: str):
         self.scan_id = scan_id
         # Connect to Redis
-        redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
         self.redis_client = redis.from_url(redis_url, decode_responses=True)
         
     def log(self, level: str, message: str):

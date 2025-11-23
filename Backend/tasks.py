@@ -11,7 +11,7 @@ from .models import ScanTarget
 from .db_logger import DatabaseLogger
 
 # Initialize Redis for the worker to read flags
-redis_client = redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
+redis_client = redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"))
 
 
 @celery_app.task(
