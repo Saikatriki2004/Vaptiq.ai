@@ -4,6 +4,15 @@ from reporting import ReportGenerator
 from tasks import run_background_scan
 from agent import ScanTarget, Vulnerability
 from db_logger import DatabaseLogger
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from typing import Optional, List
+from datetime import datetime
+import uuid
+import aiohttp
+from verifier import verify_domain_ownership
+from store import scans_db, mock_targets_db
 
 # Initialize FastAPI app
 app = FastAPI()
@@ -20,11 +29,6 @@ app.add_middleware(
 # Initialize engines
 mitre_engine = MitreEngine()
 verifier_agent = VerifierAgent()
-
-# --- Mock Database ---
-# In a real app, this would be Postgres/Supabase. 
-# For now, we keep minimal metadata here, but status/logs come from Redis.
-scans_db = {}
 
 # --- Endpoints ---
 

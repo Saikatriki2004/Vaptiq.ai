@@ -8,9 +8,9 @@ from datetime import datetime
 from typing import List, Optional
 
 # Import centralized models
-from .models import ScanTarget, Vulnerability, ScanResult
-from .verifier_agent import VerifierAgent, SuspectedVuln
-from .db_logger import DatabaseLogger
+from models import ScanTarget, Vulnerability, ScanResult
+from verifier_agent import VerifierAgent, SuspectedVuln
+from db_logger import DatabaseLogger
 
 # --- Tool Registry ---
 # Maps TargetType to a list of Tool Functions

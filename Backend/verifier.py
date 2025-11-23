@@ -3,14 +3,11 @@ import logging
 from pydantic import BaseModel
 from datetime import datetime
 from typing import Optional
+from store import mock_targets_db
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Mock Database Interface
-# In production, this would be replaced with Prisma queries
-mock_targets_db = {}
 
 class VerificationRequest(BaseModel):
     target_id: str
