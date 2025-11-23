@@ -1,0 +1,77 @@
+version: '3.8'
+
+services:
+  # 🧠 THE BRAIN (Frontend Dashboard)
+  web:
+    build:
+      context: . # Root context for packages access
+      dockerfile: Frontend/Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      # Internal Docker URL for Server-Side calls
+      # Note: For client-side calls, this might need adjustment depending on network setup
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      - engine
+    networks:
+      - vaptiq-net
+
+  # 💪 THE MUSCLE (Python Agent)
+  engine:
+    build:
+      context: . # Root context for packages access
+      dockerfile: Backend/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      # Pass the keys from your local .env file
+      - LLM_PROVIDER=${LLM_PROVIDER}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENROUTER_MODEL=${OPENROUTER_MODEL}
+      - PRIVACY_MODE=${PRIVACY_MODE}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - MOONSHOT_API_KEY=${MOONSHOT_API_KEY}
+      - REDIS_URL=redis://redis:6379/0
+      # Database (Supabase) connection
+      - DATABASE_URL=${DATABASE_URL}
+    depends_on:
+      - redis
+    networks:
+      - vaptiq-net
+
+  # THE WORKER (Celery)
+  worker:
+    build:
+      context: . # Root context for packages access
+      dockerfile: Backend/Dockerfile
+    # Override the CMD to run Celery instead of Uvicorn
+    command: celery -A celery_config.celery_app worker --loglevel=info
+    environment:
+      # Pass the keys from your local .env file
+      - LLM_PROVIDER=${LLM_PROVIDER}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENROUTER_MODEL=${OPENROUTER_MODEL}
+      - PRIVACY_MODE=${PRIVACY_MODE}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - MOONSHOT_API_KEY=${MOONSHOT_API_KEY}
+      - REDIS_URL=redis://redis:6379/0
+      # Database (Supabase) connection
+      - DATABASE_URL=${DATABASE_URL}
+    depends_on:
+      - redis
+      - engine
+    networks:
+      - vaptiq-net
+
+  #  THE BROKER (Redis)
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    networks:
+      - vaptiq-net
+
+networks:
+  vaptiq-net:
+    driver: bridge

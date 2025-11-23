@@ -1,0 +1,68 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  role      String   @default("USER")
+  targets   Target[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Target {
+  id                String   @id @default(uuid())
+  type              String   // URL, IP, API
+  value             String
+  userId            String
+  user              User     @relation(fields: [userId], references: [id])
+  scans             Scan[]
+  
+  // DNS Verification Fields
+  verificationToken String   @default(cuid())
+  isVerified        Boolean  @default(false)
+  verifiedAt        DateTime?
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+model Scan {
+  id              String          @id @default(uuid())
+  targetId        String
+  target          Target          @relation(fields: [targetId], references: [id])
+  status          String          @default("QUEUED") // QUEUED, RUNNING, COMPLETED, FAILED
+  startedAt       DateTime?
+  endedAt         DateTime?
+  vulnerabilities Vulnerability[]
+  logs            AgentLog[]
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+}
+
+model Vulnerability {
+  id          String   @id @default(uuid())
+  scanId      String
+  scan        Scan     @relation(fields: [scanId], references: [id])
+  title       String
+  severity    String   // LOW, MEDIUM, HIGH, CRITICAL
+  status      String   @default("SUSPECTED") // SUSPECTED, CONFIRMED, FALSE_POSITIVE
+  description String
+  remediation String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model AgentLog {
+  id        String   @id @default(uuid())
+  scanId    String
+  scan      Scan     @relation(fields: [scanId], references: [id])
+  message   String
+  timestamp DateTime @default(now())
+}
