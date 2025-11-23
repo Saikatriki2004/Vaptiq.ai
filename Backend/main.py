@@ -12,7 +12,7 @@ from datetime import datetime
 import uuid
 import aiohttp
 from verifier import verify_domain_ownership
-from store import scans_db, mock_targets_db
+from store import scans_db, mock_targets_db, cve_cache
 
 # Initialize FastAPI app
 app = FastAPI()
@@ -280,19 +280,11 @@ async def verify_vulnerability_endpoint(suspected_vuln: SuspectedVuln):
 async def root():
     return {"message": "Vaptiq.ai Engine Running"}
 
-# In-memory cache for CVEs
-cve_cache = {
-    "data": [],
-    "last_updated": None
-}
-
 @app.get("/cves")
 async def get_latest_cves():
     """
     Fetch latest CVEs from CIRCL.lu or fallback to LLM generation.
     """
-    global cve_cache
-    
     # Check cache (15 min TTL)
     if cve_cache["data"] and cve_cache["last_updated"]:
         if (datetime.now() - cve_cache["last_updated"]).seconds < 900:
