@@ -1,38 +1,91 @@
+# --- Imports ---
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from typing import Optional
+from datetime import datetime
+import uuid
+import aiohttp
+import logging
+import sys
+import json
+import os
+
 from verifier_agent import VerifierAgent, SuspectedVuln
 from mitre_engine import MitreEngine
 from reporting import ReportGenerator
 from tasks import run_background_scan
-from agent import ScanTarget, Vulnerability
+from agent import ScanTarget
 from db_logger import DatabaseLogger
 
-# Initialize FastAPI app
+# --- Logging Configuration ---
+logging.basicConfig(
+    stream=sys.stdout,
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+)
+logger = logging.getLogger("vaptiq.backend")
+
+# --- Helper Functions ---
+def safe_decode(value):
+    """Safely decode Redis bytes to string."""
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8", "ignore")
+    return value
+
+
+async def verify_domain_ownership(target_value: str, token: Optional[str] = None):
+    """Verify domain ownership via DNS TXT record.
+    TODO: Implement real DNS TXT check using dnspython"""
+    logger.info(f"Verifying domain ownership for {target_value}")
+    return {"verified": True, "method": "mock", "target": target_value}
+
+
+# --- FastAPI App Initialization ---
 app = FastAPI()
 
-# Add CORS middleware for frontend communication
+# --- CORS Configuration ---
+# Load allowed origins from environment with fallback to localhost
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:3001")
+allowed_origins_list = [origin.strip() for origin in ALLOWED_ORIGINS.split(",")]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001"],
+    allow_origins=allowed_origins_list,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
-# Initialize engines
+# --- Initialize Engines ---
 mitre_engine = MitreEngine()
 verifier_agent = VerifierAgent()
 
-# --- Mock Database ---
-# In a real app, this would be Postgres/Supabase. 
-# For now, we keep minimal metadata here, but status/logs come from Redis.
+# --- Mock Databases ---
+# NOTE: Global mutable state (scans_db, mock_targets_db, cve_cache, engines)
+# is a technical debt. Consider moving to FastAPI lifespan or dependency injection.
 scans_db = {}
+mock_targets_db = {}
 
 # --- Endpoints ---
 
 @app.get("/scan/{scan_id}/export")
 async def export_scan(scan_id: str, format: str = "pdf", severities: Optional[str] = None):
+    """Export scan report in PDF, HTML, or JSON format."""
+    # Validate format parameter
+    allowed_formats = {"pdf", "html", "json"}
+    if format not in allowed_formats:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid format '{format}'. Allowed: {', '.join(allowed_formats)}"
+        )
+    
     # Fetch scan result from Redis via DatabaseLogger helper or direct redis
     # For MVP, we'll try to reconstruct from what we have or use mock if missing
     # In production, this would query the persistent DB
+    
+    # NOTE: Ensure ReportGenerator.generate_html sanitizes user-controlled fields
+    # (e.g., proof, description) to prevent XSS vulnerabilities
     
     # Mock data fallback for demo
     scan_result = {
@@ -70,27 +123,31 @@ async def export_scan(scan_id: str, format: str = "pdf", severities: Optional[st
             if f.get("severity", "LOW").upper() in severity_list
         ]
     
-    if format == "pdf":
-        pdf_io = ReportGenerator.generate_pdf(scan_result)
-        return StreamingResponse(
-            pdf_io, 
-            media_type="application/pdf", 
-            headers={"Content-Disposition": f"attachment; filename=vaptiq_report_{scan_id}.pdf"}
-        )
-    elif format == "html":
-        html_io = ReportGenerator.generate_html(scan_result)
-        return StreamingResponse(
-            html_io, 
-            media_type="text/html", 
-            headers={"Content-Disposition": f"attachment; filename=vaptiq_report_{scan_id}.html"}
-        )
-    else:
-        json_io = ReportGenerator.generate_json(scan_result)
-        return StreamingResponse(
-            json_io, 
-            media_type="application/json", 
-            headers={"Content-Disposition": f"attachment; filename=vaptiq_report_{scan_id}.json"}
-        )
+    try:
+        if format == "pdf":
+            pdf_io = ReportGenerator.generate_pdf(scan_result)
+            return StreamingResponse(
+                pdf_io,
+                media_type="application/pdf",
+                headers={"Content-Disposition": f"attachment; filename=vaptiq_report_{scan_id}.pdf"}
+            )
+        elif format == "html":
+            html_io = ReportGenerator.generate_html(scan_result)
+            return StreamingResponse(
+                html_io,
+                media_type="text/html",
+                headers={"Content-Disposition": f"attachment; filename=vaptiq_report_{scan_id}.html"}
+            )
+        else:  # json
+            json_io = ReportGenerator.generate_json(scan_result)
+            return StreamingResponse(
+                json_io,
+                media_type="application/json",
+                headers={"Content-Disposition": f"attachment; filename=vaptiq_report_{scan_id}.json"}
+            )
+    except Exception as e:
+        logger.exception(f"Report generation failed for scan {scan_id}")
+        raise HTTPException(status_code=500, detail="Failed to generate report")
 
 
 @app.post("/scan/{scan_id}/simulate-attack")
@@ -134,16 +191,19 @@ async def start_scan(target: ScanTarget, target_id: Optional[str] = None):
     scan_id = str(uuid.uuid4())
     
     # 1. Create DB Entry (Status: QUEUED)
+    # Pydantic v2 compatibility: use model_dump if available, fallback to dict
+    target_data = target.model_dump(mode='json') if hasattr(target, 'model_dump') else target.dict()
+    
     scans_db[scan_id] = {
         "scan_id": scan_id,
         "status": "QUEUED",
-        "target": target.dict(),
+        "target": target_data,
         "target_id": target_id,
         "created_at": datetime.now()
     }
     
     # 2. Dispatch to Redis/Celery
-    task = run_background_scan.delay(target.dict(), scan_id)
+    task = run_background_scan.delay(target_data, scan_id)
     
     return {
         "scan_id": scan_id,
@@ -162,29 +222,30 @@ async def list_scans():
     
     for scan_id, scan_data in scans_db.items():
         # Get real-time data from Redis
-        logger = DatabaseLogger(scan_id)
-        redis_status = logger.redis_client.get(f"scan:{scan_id}:status")
+        db_logger = DatabaseLogger(scan_id)
+        redis_status_raw = db_logger.redis_client.get(f"scan:{scan_id}:status")
+        redis_status = safe_decode(redis_status_raw)
         
         # Calculate severity summary
         summary = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
-        vuln_json = logger.redis_client.get(f"scan:{scan_id}:vulnerabilities")
+        vuln_json_raw = db_logger.redis_client.get(f"scan:{scan_id}:vulnerabilities")
         
-        if vuln_json:
-            import json
+        if vuln_json_raw:
+            vuln_json_str = safe_decode(vuln_json_raw)
             try:
-                vulnerabilities = json.loads(vuln_json)
+                vulnerabilities = json.loads(vuln_json_str)
                 for v in vulnerabilities:
                     sev = v.get("severity", "LOW").upper()
                     if sev in summary:
                         summary[sev] += 1
-            except:
-                pass
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse vulnerabilities JSON for scan {scan_id}: {e}")
 
         # Build enriched scan object
         scan_list.append({
             "scan_id": scan_id,
             "status": redis_status or scan_data["status"],
-            "target": scan_data["target"], # Includes tags now
+            "target": scan_data["target"],
             "created_at": scan_data["created_at"],
             "summary": summary
         })
@@ -195,22 +256,30 @@ async def list_scans():
 
 @app.get("/scan/{scan_id}")
 async def get_scan_status(scan_id: str):
+    """Get real-time status, logs, and vulnerabilities for a scan."""
     if scan_id not in scans_db:
-        return {"error": "Scan not found"}
+        raise HTTPException(status_code=404, detail="Scan not found")
         
     # Get real-time status from Redis
-    logger = DatabaseLogger(scan_id)
+    db_logger = DatabaseLogger(scan_id)
     
-    # Fetch logs from Redis
-    logs = logger.redis_client.lrange(f"scan:{scan_id}:logs", 0, -1)
-    status = logger.redis_client.get(f"scan:{scan_id}:status") or scans_db[scan_id]["status"]
+    # Fetch logs from Redis with safe decoding
+    logs_raw = db_logger.redis_client.lrange(f"scan:{scan_id}:logs", 0, -1)
+    logs = [safe_decode(log) for log in logs_raw] if logs_raw else []
+    
+    status_raw = db_logger.redis_client.get(f"scan:{scan_id}:status")
+    status = safe_decode(status_raw) or scans_db[scan_id]["status"]
     
     # Fetch vulnerabilities if completed
     vulnerabilities = []
-    vuln_json = logger.redis_client.get(f"scan:{scan_id}:vulnerabilities")
-    if vuln_json:
-        import json
-        vulnerabilities = json.loads(vuln_json)
+    vuln_json_raw = db_logger.redis_client.get(f"scan:{scan_id}:vulnerabilities")
+    if vuln_json_raw:
+        vuln_json_str = safe_decode(vuln_json_raw)
+        try:
+            vulnerabilities = json.loads(vuln_json_str)
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse vulnerabilities JSON for scan {scan_id}: {e}")
+            vulnerabilities = []
 
     return {
         "scan_id": scan_id,
@@ -225,7 +294,17 @@ async def verify_target(target_id: str):
     """
     Verify domain ownership via DNS TXT record.
     """
-    result = await verify_domain_ownership(target_id)
+    if target_id not in mock_targets_db:
+        raise HTTPException(status_code=404, detail="Target not found")
+    
+    target = mock_targets_db[target_id]
+    result = await verify_domain_ownership(target["value"], token=target.get("verification_token"))
+    
+    # Update verification status if successful
+    if result.get("verified"):
+        mock_targets_db[target_id]["is_verified"] = True
+        mock_targets_db[target_id]["verified_at"] = datetime.now()
+    
     return result
 
 @app.post("/targets/create")
@@ -291,34 +370,41 @@ async def get_latest_cves():
     
     # Check cache (15 min TTL)
     if cve_cache["data"] and cve_cache["last_updated"]:
-        if (datetime.now() - cve_cache["last_updated"]).seconds < 900:
+        cache_age = (datetime.now() - cve_cache["last_updated"]).total_seconds()
+        if cache_age < 900:  # 15 minutes
             return cve_cache["data"]
 
     try:
         # 1. Try fetching from CIRCL.lu
-        async with aiohttp.ClientSession() as session:
-            async with session.get("https://cve.circl.lu/api/last", timeout=5) as response:
+        timeout = aiohttp.ClientTimeout(total=6, connect=3, sock_read=5)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get("https://cve.circl.lu/api/last") as response:
                 if response.status == 200:
-                    data = await response.json()
-                    # Transform to our format
-                    formatted_cves = []
-                    for item in data[:10]: # Get top 10
-                        formatted_cves.append({
-                            "id": item.get("id"),
-                            "title": item.get("summary", "No description available")[:100] + "...",
-                            "severity": "HIGH", # Default as API might not have CVSS immediately
-                            "date": item.get("Published", datetime.now().isoformat()),
-                            "link": f"https://cve.mitre.org/cgi-bin/cvename.cgi?name={item.get('id')}"
-                        })
-                    
-                    cve_cache["data"] = formatted_cves
-                    cve_cache["last_updated"] = datetime.now()
-                    return formatted_cves
+                    try:
+                        data = await response.json()
+                        # Transform to our format
+                        formatted_cves = []
+                        for item in data[:10]:  # Get top 10
+                            formatted_cves.append({
+                                "id": item.get("id"),
+                                "title": item.get("summary", "No description available")[:100] + "...",
+                                "severity": "HIGH",  # Default as API might not have CVSS immediately
+                                "date": item.get("Published", datetime.now().isoformat()),
+                                "link": f"https://cve.mitre.org/cgi-bin/cvename.cgi?name={item.get('id')}"
+                            })
+                        
+                        cve_cache["data"] = formatted_cves
+                        cve_cache["last_updated"] = datetime.now()
+                        return formatted_cves
+                    except (aiohttp.ContentTypeError, json.JSONDecodeError) as e:
+                        logger.warning(f"CVE API returned non-JSON response: {e}")
+    except aiohttp.ClientError as e:
+        logger.warning(f"CVE API request failed: {e}")
     except Exception as e:
-        print(f"⚠️ CVE API Error: {e}")
+        logger.exception(f"Unexpected error fetching CVEs: {e}")
         
-    # 2. Fallback to LLM
-    print("⚠️ Falling back to LLM for CVEs...")
+    # 2. Fallback to LLM/Mock data
+    logger.info("Falling back to mock CVE data...")
     try:
         # Use the verifier agent's LLM to generate realistic data
         prompt = """
@@ -363,5 +449,5 @@ async def get_latest_cves():
         return fallback_cves
 
     except Exception as e:
-        print(f"❌ LLM Fallback Error: {e}")
+        logger.exception(f"LLM fallback error: {e}")
         return []
