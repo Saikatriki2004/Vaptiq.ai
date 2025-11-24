@@ -5,7 +5,7 @@ export async function middleware(request: NextRequest) {
     // Temporarily bypass Supabase auth if credentials are not configured
     if (!process.env.NEXT_PUBLIC_SUPABASE_URL ||
         process.env.NEXT_PUBLIC_SUPABASE_URL === 'your-project-url') {
-        return NextResponse.next();
+        return NextResponse.redirect(new URL('/login', request.url));
     }
 
     let response = NextResponse.next({

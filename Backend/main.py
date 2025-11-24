@@ -1,8 +1,8 @@
 # --- Imports ---
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
 import uuid
 import aiohttp
@@ -10,13 +10,19 @@ import logging
 import sys
 import json
 import os
+from sqlalchemy import select, func
+from sqlalchemy.orm import selectinload
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from verifier_agent import VerifierAgent, SuspectedVuln
 from mitre_engine import MitreEngine
 from reporting import ReportGenerator
 from tasks import run_background_scan
-from agent import ScanTarget
+from agent import ScanTarget as ScanTargetPydantic
 from db_logger import DatabaseLogger
+from store import engine, Base, get_db
+from models_orm import Target, Scan, Vulnerability
+from verifier import verify_domain_ownership
 
 # --- Logging Configuration ---
 logging.basicConfig(
@@ -33,19 +39,17 @@ def safe_decode(value):
         return value.decode("utf-8", "ignore")
     return value
 
-
-async def verify_domain_ownership(target_value: str, token: Optional[str] = None):
-    """Verify domain ownership via DNS TXT record.
-    TODO: Implement real DNS TXT check using dnspython"""
-    logger.info(f"Verifying domain ownership for {target_value}")
-    return {"verified": True, "method": "mock", "target": target_value}
-
-
 # --- FastAPI App Initialization ---
 app = FastAPI()
 
+# --- Database Initialization ---
+@app.on_event("startup")
+async def startup():
+    # Create tables if they don't exist
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
 # --- CORS Configuration ---
-# Load allowed origins from environment with fallback to localhost
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:3001")
 allowed_origins_list = [origin.strip() for origin in ALLOWED_ORIGINS.split(",")]
 
@@ -61,18 +65,11 @@ app.add_middleware(
 mitre_engine = MitreEngine()
 verifier_agent = VerifierAgent()
 
-# --- Mock Databases ---
-# NOTE: Global mutable state (scans_db, mock_targets_db, cve_cache, engines)
-# is a technical debt. Consider moving to FastAPI lifespan or dependency injection.
-scans_db = {}
-mock_targets_db = {}
-
 # --- Endpoints ---
 
 @app.get("/scan/{scan_id}/export")
-async def export_scan(scan_id: str, format: str = "pdf", severities: Optional[str] = None):
+async def export_scan(scan_id: str, format: str = "pdf", severities: Optional[str] = None, db: AsyncSession = Depends(get_db)):
     """Export scan report in PDF, HTML, or JSON format."""
-    # Validate format parameter
     allowed_formats = {"pdf", "html", "json"}
     if format not in allowed_formats:
         raise HTTPException(
@@ -80,48 +77,37 @@ async def export_scan(scan_id: str, format: str = "pdf", severities: Optional[st
             detail=f"Invalid format '{format}'. Allowed: {', '.join(allowed_formats)}"
         )
     
-    # Fetch scan result from Redis via DatabaseLogger helper or direct redis
-    # For MVP, we'll try to reconstruct from what we have or use mock if missing
-    # In production, this would query the persistent DB
+    # Fetch scan from DB
+    result = await db.execute(
+        select(Scan).options(selectinload(Scan.vulnerabilities), selectinload(Scan.target)).where(Scan.id == scan_id)
+    )
+    scan = result.scalars().first()
     
-    # NOTE: Ensure ReportGenerator.generate_html sanitizes user-controlled fields
-    # (e.g., proof, description) to prevent XSS vulnerabilities
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+
+    # Construct scan_result dict for ReportGenerator
+    findings = []
+    for vuln in scan.vulnerabilities:
+        findings.append({
+            "type": vuln.title,
+            "severity": vuln.severity,
+            "description": vuln.description,
+            "proof": vuln.proof
+        })
     
-    # Mock data fallback for demo
-    scan_result = {
-        "id": scan_id,
-        "target": "https://example.com",
-        "status": "completed",
-        "timestamp": datetime.now().isoformat(),
-        "findings": [
-            {
-                "type": "SQL Injection",
-                "severity": "CRITICAL",
-                "description": "SQL Injection vulnerability detected in login parameter.",
-                "proof": "' OR '1'='1"
-            },
-            {
-                "type": "XSS",
-                "severity": "HIGH",
-                "description": "Reflected XSS in search bar.",
-                "proof": "<script>alert(1)</script>"
-            },
-            {
-                "type": "Missing Headers",
-                "severity": "LOW",
-                "description": "X-Content-Type-Options header missing.",
-                "proof": "Header not found"
-            }
-        ]
-    }
-    
-    # Filter findings if severities are provided
+    # Filter findings
     if severities:
         severity_list = [s.upper() for s in severities.split(",")]
-        scan_result["findings"] = [
-            f for f in scan_result["findings"] 
-            if f.get("severity", "LOW").upper() in severity_list
-        ]
+        findings = [f for f in findings if f.get("severity", "LOW").upper() in severity_list]
+
+    scan_result = {
+        "id": scan.id,
+        "target": scan.target.value if scan.target else "Unknown",
+        "status": scan.status,
+        "timestamp": scan.createdAt.isoformat() if scan.createdAt else datetime.now().isoformat(),
+        "findings": findings
+    }
     
     try:
         if format == "pdf":
@@ -151,16 +137,20 @@ async def export_scan(scan_id: str, format: str = "pdf", severities: Optional[st
 
 
 @app.post("/scan/{scan_id}/simulate-attack")
-async def simulate_attack(scan_id: str):
-    # Fetch findings from Redis/DB
-    # For demo, using mock
+async def simulate_attack(scan_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Scan).options(selectinload(Scan.vulnerabilities)).where(Scan.id == scan_id))
+    scan = result.scalars().first()
+
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+
     findings = [
         {
-            "type": "SQL Injection",
-            "severity": "CRITICAL",
-            "description": "SQL Injection vulnerability detected in login parameter.",
-            "proof": "' OR '1'='1"
-        }
+            "type": v.title,
+            "severity": v.severity,
+            "description": v.description,
+            "proof": v.proof
+        } for v in scan.vulnerabilities
     ]
         
     graph = mitre_engine.simulate_attack_path(findings)
@@ -168,123 +158,173 @@ async def simulate_attack(scan_id: str):
 
 
 @app.post("/scan")
-async def start_scan(target: ScanTarget, target_id: Optional[str] = None):
+async def start_scan(target_input: ScanTargetPydantic, target_id: Optional[str] = None, db: AsyncSession = Depends(get_db)):
     """
     Start a vulnerability scan on a target.
-    Dispatches job to Celery worker.
     """
-    # Check if target requires verification (URL type)
-    if target.type == "URL":
-        if not target_id or target_id not in mock_targets_db:
+    user_id = "mock-user-123"
+
+    # 1. Rate Limiting (Feature C)
+    # Count active scans (QUEUED or RUNNING) for this user
+    # Assuming targets belong to user_id. We check active scans linked to targets owned by user_id.
+    active_scans_result = await db.execute(
+        select(func.count(Scan.id))
+        .join(Target)
+        .where(Target.userId == user_id)
+        .where(Scan.status.in_(["QUEUED", "RUNNING"]))
+    )
+    active_count = active_scans_result.scalar()
+
+    if active_count >= 2:
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded. Maximum 2 active scans allowed per user."
+        )
+
+    # 2. Check Target & Verification
+    if target_input.type == "URL":
+        if not target_id:
             raise HTTPException(
                 status_code=400,
                 detail="URL targets must be created and verified before scanning. Please create a target first."
             )
         
-        target_data = mock_targets_db[target_id]
-        if not target_data["is_verified"]:
+        # Fetch target from DB
+        target_result = await db.execute(select(Target).where(Target.id == target_id))
+        db_target = target_result.scalars().first()
+
+        if not db_target:
+            raise HTTPException(status_code=404, detail="Target not found")
+
+        if not db_target.isVerified:
             raise HTTPException(
                 status_code=403,
-                detail=f"Domain verification required. Please verify ownership of {target.value} before scanning."
+                detail=f"Domain verification required. Please verify ownership of {db_target.value} before scanning."
             )
+    else:
+        # For non-URL targets, we might create a transient target or assume it exists.
+        # For consistency, let's create one if target_id not provided, but simple path:
+        if target_id:
+             target_result = await db.execute(select(Target).where(Target.id == target_id))
+             db_target = target_result.scalars().first()
+        else:
+             # Create a target record for this scan
+             db_target = Target(
+                 type=target_input.type,
+                 value=target_input.value,
+                 userId=user_id,
+                 isVerified=True # IP/API might not need DNS verification
+             )
+             db.add(db_target)
+             await db.flush() # Get ID
+             target_id = db_target.id
+
+    # 3. Create Scan Entry
+    new_scan = Scan(
+        targetId=db_target.id,
+        status="QUEUED"
+    )
+    db.add(new_scan)
+    await db.commit()
+    await db.refresh(new_scan)
     
-    scan_id = str(uuid.uuid4())
-    
-    # 1. Create DB Entry (Status: QUEUED)
-    # Pydantic v2 compatibility: use model_dump if available, fallback to dict
-    target_data = target.model_dump(mode='json') if hasattr(target, 'model_dump') else target.dict()
-    
-    scans_db[scan_id] = {
-        "scan_id": scan_id,
-        "status": "QUEUED",
-        "target": target_data,
-        "target_id": target_id,
-        "created_at": datetime.now()
-    }
-    
-    # 2. Dispatch to Redis/Celery
-    task = run_background_scan.delay(target_data, scan_id)
+    # 4. Dispatch to Redis/Celery
+    target_data = target_input.model_dump(mode='json') if hasattr(target_input, 'model_dump') else target_input.dict()
+    task = run_background_scan.delay(target_data, new_scan.id)
     
     return {
-        "scan_id": scan_id,
+        "scan_id": new_scan.id,
         "status": "QUEUED",
         "task_id": task.id,
         "message": "Scan queued in background."
     }
 
 @app.get("/scans")
-async def list_scans():
+async def list_scans(db: AsyncSession = Depends(get_db)):
     """
     List all scans sorted by creation date (newest first).
-    Includes real-time status and severity summary from Redis.
     """
-    scan_list = []
+    # Fetch all scans with target info
+    result = await db.execute(
+        select(Scan).options(selectinload(Scan.target), selectinload(Scan.vulnerabilities)).order_by(Scan.createdAt.desc())
+    )
+    scans = result.scalars().all()
     
-    for scan_id, scan_data in scans_db.items():
-        # Get real-time data from Redis
-        db_logger = DatabaseLogger(scan_id)
-        redis_status_raw = db_logger.redis_client.get(f"scan:{scan_id}:status")
-        redis_status = safe_decode(redis_status_raw)
+    scan_list = []
+    for scan in scans:
+        # Get real-time status from Redis if running
+        redis_status = None
+        if scan.status in ["QUEUED", "RUNNING"]:
+            db_logger = DatabaseLogger(scan.id)
+            redis_status_raw = db_logger.redis_client.get(f"scan:{scan.id}:status")
+            redis_status = safe_decode(redis_status_raw)
+
+        status = redis_status or scan.status
         
         # Calculate severity summary
         summary = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
-        vuln_json_raw = db_logger.redis_client.get(f"scan:{scan_id}:vulnerabilities")
         
-        if vuln_json_raw:
-            vuln_json_str = safe_decode(vuln_json_raw)
-            try:
-                vulnerabilities = json.loads(vuln_json_str)
-                for v in vulnerabilities:
-                    sev = v.get("severity", "LOW").upper()
-                    if sev in summary:
-                        summary[sev] += 1
-            except json.JSONDecodeError as e:
-                logger.warning(f"Failed to parse vulnerabilities JSON for scan {scan_id}: {e}")
+        # If running, findings might be in Redis. If completed, in DB.
+        # For simplicity, use DB findings.
+        for v in scan.vulnerabilities:
+            sev = v.severity.upper()
+            if sev in summary:
+                summary[sev] += 1
 
-        # Build enriched scan object
+        # Also check Redis for real-time findings if running?
+        # Maybe skip for now to keep it simple, or merge.
+
+        target_val = scan.target.value if scan.target else "Unknown"
+        # Convert scan.target (SQLAlchemy) to dict or use value
+        target_dict = {"value": target_val, "type": scan.target.type if scan.target else "Unknown"}
+
         scan_list.append({
-            "scan_id": scan_id,
-            "status": redis_status or scan_data["status"],
-            "target": scan_data["target"],
-            "created_at": scan_data["created_at"],
+            "scan_id": scan.id,
+            "status": status,
+            "target": target_dict,
+            "created_at": scan.createdAt,
             "summary": summary
         })
 
-    # Sort by created_at desc
-    scan_list.sort(key=lambda x: x["created_at"], reverse=True)
     return scan_list
 
 @app.get("/scan/{scan_id}")
-async def get_scan_status(scan_id: str):
+async def get_scan_status(scan_id: str, db: AsyncSession = Depends(get_db)):
     """Get real-time status, logs, and vulnerabilities for a scan."""
-    if scan_id not in scans_db:
+    result = await db.execute(
+        select(Scan).options(selectinload(Scan.target), selectinload(Scan.vulnerabilities)).where(Scan.id == scan_id)
+    )
+    scan = result.scalars().first()
+
+    if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
         
-    # Get real-time status from Redis
+    # Get real-time status/logs from Redis
     db_logger = DatabaseLogger(scan_id)
     
-    # Fetch logs from Redis with safe decoding
     logs_raw = db_logger.redis_client.lrange(f"scan:{scan_id}:logs", 0, -1)
     logs = [safe_decode(log) for log in logs_raw] if logs_raw else []
     
     status_raw = db_logger.redis_client.get(f"scan:{scan_id}:status")
-    status = safe_decode(status_raw) or scans_db[scan_id]["status"]
+    status = safe_decode(status_raw) or scan.status
     
-    # Fetch vulnerabilities if completed
+    # Vulnerabilities
     vulnerabilities = []
-    vuln_json_raw = db_logger.redis_client.get(f"scan:{scan_id}:vulnerabilities")
-    if vuln_json_raw:
-        vuln_json_str = safe_decode(vuln_json_raw)
-        try:
-            vulnerabilities = json.loads(vuln_json_str)
-        except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse vulnerabilities JSON for scan {scan_id}: {e}")
-            vulnerabilities = []
+    # If completed, prefer DB. If running, prefer Redis or DB?
+    # Let's use DB findings which should be populated on completion.
+    for v in scan.vulnerabilities:
+         vulnerabilities.append({
+             "type": v.title,
+             "severity": v.severity,
+             "description": v.description,
+             "proof": v.proof,
+             "status": v.status
+         })
 
     return {
-        "scan_id": scan_id,
+        "scan_id": scan.id,
         "status": status,
-        "target": scans_db[scan_id]["target"],
+        "target": {"value": scan.target.value, "type": scan.target.type} if scan.target else None,
         "logs": logs,
         "vulnerabilities": vulnerabilities
     }
@@ -294,59 +334,57 @@ async def verify_target(target_id: str):
     """
     Verify domain ownership via DNS TXT record.
     """
-    if target_id not in mock_targets_db:
-        raise HTTPException(status_code=404, detail="Target not found")
-    
-    target = mock_targets_db[target_id]
-    result = await verify_domain_ownership(target["value"], token=target.get("verification_token"))
-    
-    # Update verification status if successful
-    if result.get("verified"):
-        mock_targets_db[target_id]["is_verified"] = True
-        mock_targets_db[target_id]["verified_at"] = datetime.now()
-    
-    return result
+    # Call the verifier module (which now uses DB)
+    result = await verify_domain_ownership(target_id)
+    return result.dict()
 
 @app.post("/targets/create")
-async def create_target(target: ScanTarget, user_id: str = "mock-user-123"):
+async def create_target(target_input: ScanTargetPydantic, user_id: str = "mock-user-123", db: AsyncSession = Depends(get_db)):
     """
-    Create a new target with auto-generated verification token.
+    Create a new target.
     """
-    target_id = str(uuid.uuid4())
-    verification_token = f"vaptiq-verify={str(uuid.uuid4())[:16]}"
-    
-    mock_targets_db[target_id] = {
-        "id": target_id,
-        "type": target.type,
-        "value": target.value,
-        "user_id": user_id,
-        "verification_token": verification_token,
-        "is_verified": False,
-        "verified_at": None,
-        "created_at": datetime.now()
-    }
+    new_target = Target(
+        type=target_input.type,
+        value=target_input.value,
+        userId=user_id
+    )
+    db.add(new_target)
+    await db.commit()
+    await db.refresh(new_target)
     
     return {
-        "target_id": target_id,
-        "verification_token": verification_token,
-        "is_verified": False,
+        "target_id": new_target.id,
+        "verification_token": new_target.verificationToken,
+        "is_verified": new_target.isVerified,
         "message": "Target created. Please verify domain ownership before scanning."
     }
 
 @app.get("/targets/{target_id}")
-async def get_target(target_id: str):
+async def get_target(target_id: str, db: AsyncSession = Depends(get_db)):
     """
-    Get target details including verification status.
+    Get target details.
     """
-    if target_id not in mock_targets_db:
+    result = await db.execute(select(Target).where(Target.id == target_id))
+    target = result.scalars().first()
+
+    if not target:
         raise HTTPException(status_code=404, detail="Target not found")
-    return mock_targets_db[target_id]
+
+    return {
+        "id": target.id,
+        "type": target.type,
+        "value": target.value,
+        "user_id": target.userId,
+        "verification_token": target.verificationToken,
+        "is_verified": target.isVerified,
+        "verified_at": target.verifiedAt,
+        "created_at": target.createdAt
+    }
 
 @app.post("/verify-vulnerability")
 async def verify_vulnerability_endpoint(suspected_vuln: SuspectedVuln):
     """
     Manually verify a suspected vulnerability.
-    Useful for testing and re-verification.
     """
     result = await verifier_agent.verify_vulnerability(suspected_vuln)
     return result
@@ -355,7 +393,7 @@ async def verify_vulnerability_endpoint(suspected_vuln: SuspectedVuln):
 async def root():
     return {"message": "Vaptiq.ai Engine Running"}
 
-# In-memory cache for CVEs
+# In-memory cache for CVEs (Keep as is)
 cve_cache = {
     "data": [],
     "last_updated": None
@@ -382,13 +420,12 @@ async def get_latest_cves():
                 if response.status == 200:
                     try:
                         data = await response.json()
-                        # Transform to our format
                         formatted_cves = []
-                        for item in data[:10]:  # Get top 10
+                        for item in data[:10]:
                             formatted_cves.append({
                                 "id": item.get("id"),
                                 "title": item.get("summary", "No description available")[:100] + "...",
-                                "severity": "HIGH",  # Default as API might not have CVSS immediately
+                                "severity": "HIGH",
                                 "date": item.get("Published", datetime.now().isoformat()),
                                 "link": f"https://cve.mitre.org/cgi-bin/cvename.cgi?name={item.get('id')}"
                             })
@@ -403,51 +440,21 @@ async def get_latest_cves():
     except Exception as e:
         logger.exception(f"Unexpected error fetching CVEs: {e}")
         
-    # 2. Fallback to LLM/Mock data
+    # 2. Fallback to Mock data
     logger.info("Falling back to mock CVE data...")
-    try:
-        # Use the verifier agent's LLM to generate realistic data
-        prompt = """
-        Generate a JSON list of 5 recent critical cybersecurity vulnerabilities (CVEs) from late 2024 or 2025.
-        Format: [{"id": "CVE-YYYY-XXXX", "title": "Short Title", "severity": "CRITICAL|HIGH", "date": "YYYY-MM-DD"}]
-        Return ONLY the JSON.
-        """
-        # We reuse the verifier agent's method or a direct call if possible.
-        # For simplicity in this file, we'll assume we can use the agent's internal LLM helper
-        # or just instantiate a quick one if needed. 
-        # Since VerifierAgent is complex, let's use a simplified mock for now if the agent isn't easily callable for this specific task,
-        # BUT the user specifically asked for LLM usage.
-        
-        # Let's try to use the verifier_agent instance we already have
-        if verifier_agent:
-             # We need a method to just run a prompt. VerifierAgent doesn't expose one publicly easily.
-             # We'll create a temporary helper here or just mock the LLM call structure if we can't access it.
-             # Actually, let's just use the mock data for now BUT labeled as "AI Generated" to satisfy the requirement 
-             # without breaking the app if the LLM is not configured.
-             # WAIT, user explicitly said "use LLMs API key".
-             pass
-
-        # Simulating LLM response for stability in this snippet (as we don't want to break the build with complex LLM calls in main.py yet)
-        # In a real implementation, we would call `verifier_agent.llm_provider.chat(...)`
-        
-        fallback_cves = [
-            {
-                "id": "CVE-2025-1001 (AI-Est)",
-                "title": "Simulated: Critical RCE in Cloud Infrastructure",
-                "severity": "CRITICAL",
-                "date": datetime.now().strftime("%Y-%m-%d"),
-                "link": "#"
-            },
-            {
-                "id": "CVE-2025-1002 (AI-Est)",
-                "title": "Simulated: SQL Injection in Banking API",
-                "severity": "HIGH",
-                "date": datetime.now().strftime("%Y-%m-%d"),
-                "link": "#"
-            }
-        ]
-        return fallback_cves
-
-    except Exception as e:
-        logger.exception(f"LLM fallback error: {e}")
-        return []
+    return [
+        {
+            "id": "CVE-2025-1001 (AI-Est)",
+            "title": "Simulated: Critical RCE in Cloud Infrastructure",
+            "severity": "CRITICAL",
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "link": "#"
+        },
+        {
+            "id": "CVE-2025-1002 (AI-Est)",
+            "title": "Simulated: SQL Injection in Banking API",
+            "severity": "HIGH",
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "link": "#"
+        }
+    ]

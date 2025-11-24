@@ -4,15 +4,46 @@ Resilient Celery Worker with Redis Integration
 import asyncio
 import redis
 import os
+from datetime import datetime
 from celery.exceptions import SoftTimeLimitExceeded
-from .celery_config import celery_app
-from .agent import SecurityAgent
-from .models import ScanTarget
-from .db_logger import DatabaseLogger
+from celery_config import celery_app
+from agent import SecurityAgent
+from models import ScanTarget
+from db_logger import DatabaseLogger
+from store import AsyncSessionLocal
+from models_orm import Scan, Vulnerability
+from sqlalchemy import select
 
 # Initialize Redis for the worker to read flags
 redis_client = redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"))
 
+async def save_results_to_db(scan_id: str, vulnerabilities: list):
+    """Persist scan results to the database."""
+    async with AsyncSessionLocal() as db:
+        # Fetch the scan object
+        result = await db.execute(select(Scan).where(Scan.id == scan_id))
+        scan = result.scalars().first()
+
+        if not scan:
+            return # Should not happen
+
+        scan.status = "COMPLETED"
+        scan.endedAt = datetime.utcnow()
+
+        # Add vulnerabilities
+        for v in vulnerabilities:
+            new_vuln = Vulnerability(
+                scanId=scan.id,
+                title=v.get("title", "Unknown"),
+                severity=v.get("severity", "LOW"),
+                status=v.get("status", "SUSPECTED"),
+                description=v.get("description", ""),
+                remediation=v.get("remediation", ""),
+                proof=v.get("proof_of_exploit", "")
+            )
+            db.add(new_vuln)
+
+        await db.commit()
 
 @celery_app.task(
     bind=True,
@@ -50,6 +81,9 @@ def run_background_scan(self, target_data: dict, scan_id: str):
         # Save results to Redis
         logger.save_vulnerabilities(result.get("vulnerabilities", []))
         
+        # Save results to Database (Persistence)
+        asyncio.run(save_results_to_db(scan_id, result.get("vulnerabilities", [])))
+
         # Log completion
         logger.log("SYSTEM", "Scan completed successfully.")
         logger.update_status("COMPLETED")

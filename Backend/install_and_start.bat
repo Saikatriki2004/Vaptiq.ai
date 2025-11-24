@@ -32,6 +32,16 @@ if %errorlevel% == 0 (
 )
 echo.
 
+echo [3.5/4] Applying Database Schema (Prisma)...
+call npx prisma db push --schema=../packages/database/schema.prisma
+if errorlevel 1 (
+    echo WARNING: Database migration failed.
+    echo Ensure Postgres is running and DATABASE_URL is set.
+    pause
+    exit /b 1
+)
+echo.
+
 echo [4/4] Starting Backend Server...
 echo Server will be available at: http://localhost:8000
 echo API Documentation: http://localhost:8000/docs
