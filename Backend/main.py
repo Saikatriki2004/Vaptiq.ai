@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from typing import Optional
 from datetime import datetime
+from contextlib import asynccontextmanager
 import uuid
 import aiohttp
 import logging
@@ -17,6 +18,7 @@ from reporting import ReportGenerator
 from tasks import run_background_scan
 from agent import ScanTarget
 from db_logger import DatabaseLogger
+from db import db, connect_db, disconnect_db
 
 # --- Logging Configuration ---
 logging.basicConfig(
@@ -41,8 +43,18 @@ async def verify_domain_ownership(target_value: str, token: Optional[str] = None
     return {"verified": True, "method": "mock", "target": target_value}
 
 
+# --- Lifecycle Manager ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manages application startup and shutdown events"""
+    # Startup: Connect to database
+    await connect_db()
+    yield
+    # Shutdown: Disconnect from database
+    await disconnect_db()
+
 # --- FastAPI App Initialization ---
-app = FastAPI()
+app = FastAPI(lifespan=lifespan)
 
 # --- CORS Configuration ---
 # Load allowed origins from environment with fallback to localhost
@@ -62,8 +74,9 @@ mitre_engine = MitreEngine()
 verifier_agent = VerifierAgent()
 
 # --- Mock Databases ---
-# NOTE: Global mutable state (scans_db, mock_targets_db, cve_cache, engines)
-# is a technical debt. Consider moving to FastAPI lifespan or dependency injection.
+# TODO: Replace with Prisma queries once schema is defined
+# NOTE: scans_db will be replaced with db.scan queries
+# NOTE: mock_targets_db will be replaced with db.target queries
 scans_db = {}
 mock_targets_db = {}
 

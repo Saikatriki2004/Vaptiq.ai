@@ -8,3 +8,6 @@ fpdf2
 jinja2
 celery>=5.3.0
 redis>=5.0.0
+prisma
+e2b-code-interpreter
+xmltodict

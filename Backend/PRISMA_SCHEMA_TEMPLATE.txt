@@ -1,0 +1,45 @@
+# Prisma Database Schema for Vaptiq.ai
+
+# NOTE: This schema needs to be created to fully enable Prisma integration
+# Once created, run: prisma generate && prisma db push
+
+# Example schema structure:
+# 
+# model Target {
+#   id                String   @id @default(uuid())
+#   type              String   // URL, IP, API
+#   value             String
+#   userId            String
+#   verificationToken String?
+#   isVerified        Boolean  @default(false)
+#   verifiedAt        DateTime?
+#   createdAt         DateTime @default(now())
+#   scans             Scan[]
+# }
+#
+# model Scan {
+#   id               String          @id @default(uuid())
+#   targetId         String?
+#   target           Target?         @relation(fields: [targetId], references: [id])
+#   status           String          // QUEUED, RUNNING, COMPLETED, FAILED
+#   createdAt        DateTime        @default(now())
+#   vulnerabilities  Vulnerability[]
+# }
+#
+# model Vulnerability {
+#   id          String   @id @default(uuid())
+#   scanId      String
+#   scan        Scan     @relation(fields: [scanId], references: [id])
+#   title       String
+#   severity    String   // CRITICAL, HIGH, MEDIUM, LOW
+#   description String
+#   remediation String
+#   status      String   @default("SUSPECTED")
+#   createdAt   DateTime @default(now())
+# }
+
+# To activate:
+# 1. Create prisma/schema.prisma with the above models
+# 2. Set DATABASE_URL in .env (e.g., PostgreSQL from Supabase)
+# 3. Run: prisma generate
+# 4. Run: prisma db push
