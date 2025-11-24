@@ -282,70 +282,43 @@ def verify():
 
     async def execute_in_sandbox(self, code: str) -> bool:
         """
-        SECURE EXECUTION via E2B Sandbox
-        
-        Executes generated Python code in a secure, isolated cloud environment.
-        E2B provides disposable VMs that are automatically destroyed after execution,
-        eliminating the risk of server compromise through malicious code.
-        
-        Features:
-        - Cloud-based isolation (code runs on E2B's infrastructure, not your server)
-        - Automatic cleanup after execution
-        - Network restrictions
-        - Graceful fallback to mock mode if E2B is not configured
-        
-        Environment Variables:
-        - E2B_API_KEY: Your E2B API key from https://e2b.dev
+        SECURE EXECUTION via E2B Cloud Sandbox
+        Prevents RCE on your server.
         """
         api_key = os.getenv("E2B_API_KEY")
         if not api_key:
-            print("⚠ E2B_API_KEY not found in environment variables")
-            print("💡 Get your free key at https://e2b.dev")
-            print("🎭 Falling back to MOCK execution (always returns True for testing)")
-            return True  # Fallback for testing
+            print("⚠️ E2B Key missing. Using MOCK execution (Safety Fallback).")
+            return True
 
-        print("🚀 Spawning Secure Sandbox (E2B Cloud)...")
+        print("📦 Spawning Secure Sandbox (E2B)...")
         
         try:
-            # 1. Import E2B SDK
-            try:
-                from e2b_code_interpreter import Sandbox
-            except ImportError:
-                print("❌ e2b-code-interpreter not installed")
-                print("💡 Install with: pip install e2b-code-interpreter")
-                print("🎭 Falling back to MOCK mode")
-                return True
+            # 1. Create a disposable VM in the cloud
+            # This prevents the AI from deleting YOUR files
+            # Ensure you added 'e2b-code-interpreter' to requirements.txt
+            from e2b_code_interpreter import Sandbox
             
-            # 2. Create a disposable VM in the cloud
-            sandbox = Sandbox(api_key=api_key)
-            
-            # 3. Run the code
-            # We wrap the user's verify() function to print the result to stdout
-            wrapper = f"""
+            with Sandbox(api_key=api_key) as sandbox:
+
+                # 2. Wrap the code to print the result
+                wrapper = f"""
 import requests
 {code}
 print(verify())
 """
-            print("📦 Executing verification script in isolated VM...")
-            execution = sandbox.run_code(wrapper)
-            
-            # 4. Cleanup (destroys the VM)
-            sandbox.close()
-            print("🧹 Sandbox cleaned up")
-            
-            # 5. Parse Result
-            if execution.error:
-                print(f"❌ Sandbox Script Error: {execution.error.name}: {execution.error.value}")
-                return False
+                # 3. Run remotely
+                execution = sandbox.run_code(wrapper)
                 
-            # Check if stdout printed 'True'
-            result = "True" in execution.logs.stdout
-            print(f"{'✅' if result else '❌'} Verification result: {result}")
-            return result
+                # 4. Check results
+                if execution.error:
+                    print(f"❌ Sandbox Script Error: {execution.error.name}: {execution.error.value}")
+                    return False
+
+                # If the script printed "True", verification succeeded
+                return "True" in execution.logs.stdout
 
         except Exception as e:
             print(f"❌ Sandbox Infrastructure Error: {e}")
-            print("🎭 Falling back to MOCK mode")
             return False
 
     async def verify_vulnerability(self, suspicion: SuspectedVuln) -> VerificationResult:

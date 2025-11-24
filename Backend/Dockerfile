@@ -24,7 +24,10 @@ COPY Backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 4. Copy Prisma Schema (accessible from root context)
-COPY packages/database/schema.prisma ./prisma/schema.prisma
+COPY Backend/prisma/schema.prisma ./prisma/schema.prisma
+
+# Generate Prisma Client
+RUN prisma generate --schema=./prisma/schema.prisma
 
 # 5. Copy Backend Source Code (path relative to root)
 COPY Backend/ .

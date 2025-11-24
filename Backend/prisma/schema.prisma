@@ -1,0 +1,42 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-py"
+}
+
+model Target {
+  id                String   @id @default(uuid())
+  type              String   // URL, IP, API
+  value             String
+  userId            String
+  verificationToken String?
+  isVerified        Boolean  @default(false)
+  verifiedAt        DateTime?
+  createdAt         DateTime @default(now())
+  scans             Scan[]
+}
+
+model Scan {
+  id               String          @id @default(uuid())
+  targetId         String?
+  target           Target?         @relation(fields: [targetId], references: [id])
+  status           String          // QUEUED, RUNNING, COMPLETED, FAILED
+  createdAt        DateTime        @default(now())
+  vulnerabilities  Vulnerability[]
+}
+
+model Vulnerability {
+  id          String   @id @default(uuid())
+  scanId      String
+  scan        Scan     @relation(fields: [scanId], references: [id])
+  title       String
+  severity    String   // CRITICAL, HIGH, MEDIUM, LOW
+  description String
+  remediation String
+  proof_of_exploit String?
+  status      String   @default("SUSPECTED")
+  createdAt   DateTime @default(now())
+}

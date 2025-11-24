@@ -27,26 +27,19 @@ TOOL_REGISTRY = {
 async def run_nmap_scan(target: str) -> List[Vulnerability]:
     """
     EXECUTING REAL NMAP BINARY
-    Runs actual Nmap scan with XML output and parses results.
     """
-    print(f"⚔️ Executing Nmap on {target}...")
+    print(f"🚀 Executing Nmap on {target}...")
     
-    # Check if nmap is installed
+    # Check if nmap is installed (It is in our Dockerfile)
     nmap_path = shutil.which("nmap")
     if not nmap_path:
-        print("⚠️ Nmap not found on server")
-        return [Vulnerability(
-            title="Configuration Error",
-            severity="LOW",
-            description="Nmap not found on server",
-            remediation="Install Nmap: apt-get install nmap (Linux) or download from nmap.org"
-        )]
+        return [Vulnerability(title="Config Error", severity="LOW", description="Nmap not installed", remediation="Install Nmap")]
 
-    # Run Nmap with XML output (-oX -)
-    # -sV: Version detection, -T4: Fast timing, --top-ports 100: Quick scan
+    # Command: Service Version detection (-sV), Fast timing (-T4), XML output (-oX -)
     cmd = [nmap_path, "-sV", "-T4", "--top-ports", "100", "-oX", "-", target]
     
     try:
+        # Run Nmap asynchronously
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -61,15 +54,15 @@ async def run_nmap_scan(target: str) -> List[Vulnerability]:
         data = xmltodict.parse(stdout)
         vulnerabilities = []
         
-        # Logic to extract open ports
-        hosts = data.get('nmaprun', {}).get('host', [])
-        if isinstance(hosts, dict):
-            hosts = [hosts]  # Handle single host case
+        # Extract open ports logic
+        # (Handle list vs dict edge cases in XML parsing)
+        nmap_run = data.get('nmaprun', {})
+        hosts = nmap_run.get('host', [])
+        if isinstance(hosts, dict): hosts = [hosts]
         
         for host in hosts:
             ports = host.get('ports', {}).get('port', [])
-            if isinstance(ports, dict):
-                ports = [ports]
+            if isinstance(ports, dict): ports = [ports]
             
             for port in ports:
                 state = port.get('state', {}).get('@state')
@@ -80,12 +73,11 @@ async def run_nmap_scan(target: str) -> List[Vulnerability]:
                     
                     vulnerabilities.append(Vulnerability(
                         title=f"Open Port: {port_id} ({service})",
-                        severity="LOW",
+                        severity="INFO",
                         description=f"Port {port_id} is open running {service} {version}",
-                        remediation="Close port if not needed or ensure service is patched."
+                        remediation="Verify if this service needs to be exposed."
                     ))
                     
-        print(f"✅ Nmap scan complete. Found {len(vulnerabilities)} open ports.")
         return vulnerabilities
 
     except Exception as e:

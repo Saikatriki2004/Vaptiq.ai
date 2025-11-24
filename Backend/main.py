@@ -74,11 +74,9 @@ mitre_engine = MitreEngine()
 verifier_agent = VerifierAgent()
 
 # --- Mock Databases ---
-# TODO: Replace with Prisma queries once schema is defined
-# NOTE: scans_db will be replaced with db.scan queries
-# NOTE: mock_targets_db will be replaced with db.target queries
-scans_db = {}
-mock_targets_db = {}
+# Replaced with Prisma
+# scans_db = {}
+# mock_targets_db = {}
 
 # --- Endpoints ---
 
@@ -188,83 +186,76 @@ async def start_scan(target: ScanTarget, target_id: Optional[str] = None):
     """
     # Check if target requires verification (URL type)
     if target.type == "URL":
-        if not target_id or target_id not in mock_targets_db:
-            raise HTTPException(
+        if not target_id:
+             raise HTTPException(
                 status_code=400,
-                detail="URL targets must be created and verified before scanning. Please create a target first."
+                detail="URL targets must be created and verified before scanning."
             )
         
-        target_data = mock_targets_db[target_id]
-        if not target_data["is_verified"]:
+        # Verify target exists in DB and is verified
+        db_target = await db.target.find_unique(where={"id": target_id})
+        if not db_target:
+             raise HTTPException(status_code=404, detail="Target not found")
+
+        if not db_target.isVerified:
             raise HTTPException(
                 status_code=403,
                 detail=f"Domain verification required. Please verify ownership of {target.value} before scanning."
             )
     
-    scan_id = str(uuid.uuid4())
-    
-    # 1. Create DB Entry (Status: QUEUED)
-    # Pydantic v2 compatibility: use model_dump if available, fallback to dict
-    target_data = target.model_dump(mode='json') if hasattr(target, 'model_dump') else target.dict()
-    
-    scans_db[scan_id] = {
-        "scan_id": scan_id,
+    # 1. Create Scan in Postgres (Replaces scans_db)
+    # We assume target_id exists in DB for authenticated scans
+    scan_data = {
         "status": "QUEUED",
-        "target": target_data,
-        "target_id": target_id,
-        "created_at": datetime.now()
+        "targetId": target_id if target_id else None
     }
     
+    scan = await db.scan.create(data=scan_data)
+
+    # Pydantic v2 compatibility
+    target_dict = target.model_dump(mode='json') if hasattr(target, 'model_dump') else target.dict()
+
     # 2. Dispatch to Redis/Celery
-    task = run_background_scan.delay(target_data, scan_id)
+    task = run_background_scan.delay(target_dict, scan.id)
     
-    return {
-        "scan_id": scan_id,
-        "status": "QUEUED",
-        "task_id": task.id,
-        "message": "Scan queued in background."
-    }
+    return {"scan_id": scan.id, "status": "QUEUED", "task_id": task.id}
 
 @app.get("/scans")
 async def list_scans():
     """
     List all scans sorted by creation date (newest first).
-    Includes real-time status and severity summary from Redis.
     """
-    scan_list = []
+    scans = await db.scan.find_many(
+        order={"createdAt": "desc"},
+        include={"target": True, "vulnerabilities": True},
+        take=50
+    )
     
-    for scan_id, scan_data in scans_db.items():
-        # Get real-time data from Redis
-        db_logger = DatabaseLogger(scan_id)
-        redis_status_raw = db_logger.redis_client.get(f"scan:{scan_id}:status")
+    scan_list = []
+    for scan in scans:
+        # Get real-time status from Redis if running
+        db_logger = DatabaseLogger(scan.id)
+        redis_status_raw = db_logger.redis_client.get(f"scan:{scan.id}:status")
         redis_status = safe_decode(redis_status_raw)
         
-        # Calculate severity summary
-        summary = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
-        vuln_json_raw = db_logger.redis_client.get(f"scan:{scan_id}:vulnerabilities")
+        final_status = redis_status if redis_status else scan.status
         
-        if vuln_json_raw:
-            vuln_json_str = safe_decode(vuln_json_raw)
-            try:
-                vulnerabilities = json.loads(vuln_json_str)
-                for v in vulnerabilities:
-                    sev = v.get("severity", "LOW").upper()
-                    if sev in summary:
-                        summary[sev] += 1
-            except json.JSONDecodeError as e:
-                logger.warning(f"Failed to parse vulnerabilities JSON for scan {scan_id}: {e}")
+        # Calculate severity summary from DB vulnerabilities
+        summary = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+        if scan.vulnerabilities:
+            for v in scan.vulnerabilities:
+                sev = v.severity.upper()
+                if sev in summary:
+                    summary[sev] += 1
 
-        # Build enriched scan object
         scan_list.append({
-            "scan_id": scan_id,
-            "status": redis_status or scan_data["status"],
-            "target": scan_data["target"],
-            "created_at": scan_data["created_at"],
+            "scan_id": scan.id,
+            "status": final_status,
+            "target": scan.target,
+            "created_at": scan.createdAt,
             "summary": summary
         })
 
-    # Sort by created_at desc
-    scan_list.sort(key=lambda x: x["created_at"], reverse=True)
     return scan_list
 
 @app.get("/scan/{scan_id}")
