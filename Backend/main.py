@@ -43,17 +43,15 @@ async def verify_domain_ownership(target_value: str, token: Optional[str] = None
     return {"verified": True, "method": "mock", "target": target_value}
 
 
-# --- Lifecycle Manager ---
+# --- Lifecycle: Connect to DB on Startup ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manages application startup and shutdown events"""
-    # Startup: Connect to database
+    print("🔌 Connecting to Database...")
     await connect_db()
     yield
-    # Shutdown: Disconnect from database
+    print("🔌 Disconnecting from Database...")
     await disconnect_db()
 
-# --- FastAPI App Initialization ---
 app = FastAPI(lifespan=lifespan)
 
 # --- CORS Configuration ---
@@ -72,11 +70,6 @@ app.add_middleware(
 # --- Initialize Engines ---
 mitre_engine = MitreEngine()
 verifier_agent = VerifierAgent()
-
-# --- Mock Databases ---
-# Replaced with Prisma
-# scans_db = {}
-# mock_targets_db = {}
 
 # --- Endpoints ---
 

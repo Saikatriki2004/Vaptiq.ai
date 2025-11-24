@@ -35,11 +35,11 @@ async def run_nmap_scan(target: str) -> List[Vulnerability]:
     if not nmap_path:
         return [Vulnerability(title="Config Error", severity="LOW", description="Nmap not installed", remediation="Install Nmap")]
 
-    # Command: Service Version detection (-sV), Fast timing (-T4), XML output (-oX -)
+    # Safe Subprocess Execution
+    # -sV: Version Detection, -T4: Fast, --top-ports 100: Quick Scan
     cmd = [nmap_path, "-sV", "-T4", "--top-ports", "100", "-oX", "-", target]
     
     try:
-        # Run Nmap asynchronously
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -48,14 +48,14 @@ async def run_nmap_scan(target: str) -> List[Vulnerability]:
         stdout, stderr = await process.communicate()
         
         if process.returncode != 0:
-            raise Exception(f"Nmap failed: {stderr.decode()}")
+            print(f"Nmap Stderr: {stderr.decode()}")
+            return []
 
-        # Parse XML Output
+        # Parse XML
         data = xmltodict.parse(stdout)
-        vulnerabilities = []
+        vulns = []
         
-        # Extract open ports logic
-        # (Handle list vs dict edge cases in XML parsing)
+        # Robust XML Traversal
         nmap_run = data.get('nmaprun', {})
         hosts = nmap_run.get('host', [])
         if isinstance(hosts, dict): hosts = [hosts]
@@ -68,20 +68,19 @@ async def run_nmap_scan(target: str) -> List[Vulnerability]:
                 state = port.get('state', {}).get('@state')
                 if state == 'open':
                     service = port.get('service', {}).get('@name', 'unknown')
-                    version = port.get('service', {}).get('@product', '')
-                    port_id = port.get('@portid', 'unknown')
+                    product = port.get('service', {}).get('@product', '')
+                    port_id = port.get('@portid')
                     
-                    vulnerabilities.append(Vulnerability(
-                        title=f"Open Port: {port_id} ({service})",
+                    vulns.append(Vulnerability(
+                        title=f"Open Port {port_id} ({service})",
                         severity="INFO",
-                        description=f"Port {port_id} is open running {service} {version}",
-                        remediation="Verify if this service needs to be exposed."
+                        description=f"Port {port_id} is open. Service: {service} {product}",
+                        remediation="Close if unnecessary."
                     ))
-                    
-        return vulnerabilities
+        return vulns
 
     except Exception as e:
-        print(f"❌ Nmap Error: {e}")
+        print(f"❌ Nmap Crash: {e}")
         return []
 
 

@@ -282,40 +282,38 @@ def verify():
 
     async def execute_in_sandbox(self, code: str) -> bool:
         """
-        SECURE EXECUTION via E2B Cloud Sandbox
-        Prevents RCE on your server.
+        🔒 SECURE SANDBOX EXECUTION (E2B)
+        Runs code on a remote microVM, not the local server.
         """
-        api_key = os.getenv("E2B_API_KEY")
-        if not api_key:
-            print("⚠️ E2B Key missing. Using MOCK execution (Safety Fallback).")
-            return True
+        e2b_key = os.getenv("E2B_API_KEY")
+        if not e2b_key:
+            print("⚠️ E2B_API_KEY missing. Falling back to MOCK (Safe Mode).")
+            return False
 
-        print("📦 Spawning Secure Sandbox (E2B)...")
-        
+        print("📦 Spawning E2B Sandbox...")
         try:
-            # 1. Create a disposable VM in the cloud
-            # This prevents the AI from deleting YOUR files
-            # Ensure you added 'e2b-code-interpreter' to requirements.txt
-            from e2b_code_interpreter import Sandbox
-            
-            with Sandbox(api_key=api_key) as sandbox:
+            # Context Manager ensures the VM is killed after use
+            with Sandbox(api_key=e2b_key) as sandbox:
 
-                # 2. Wrap the code to print the result
+                # Wrap the user script to print the boolean result
                 wrapper = f"""
 import requests
 {code}
-print(verify())
+try:
+    print(verify())
+except Exception as e:
+    print("False")
 """
-                # 3. Run remotely
-                execution = sandbox.run_code(wrapper)
-                
-                # 4. Check results
-                if execution.error:
-                    print(f"❌ Sandbox Script Error: {execution.error.name}: {execution.error.value}")
+                # Run remotely
+                exec_result = sandbox.run_code(wrapper)
+
+                if exec_result.error:
+                    print(f"❌ Script Error: {exec_result.error.value}")
                     return False
 
-                # If the script printed "True", verification succeeded
-                return "True" in execution.logs.stdout
+                # Check stdout
+                output = exec_result.logs.stdout[0] if exec_result.logs.stdout else "False"
+                return "True" in str(output)
 
         except Exception as e:
             print(f"❌ Sandbox Infrastructure Error: {e}")
