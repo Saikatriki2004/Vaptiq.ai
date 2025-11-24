@@ -2,10 +2,15 @@ import { createServerClient, type CookieOptions } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
 
 export async function middleware(request: NextRequest) {
-    // Temporarily bypass Supabase auth if credentials are not configured
+    // FAIL-CLOSED: If config is missing, block access to protected routes
     if (!process.env.NEXT_PUBLIC_SUPABASE_URL ||
+        !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
         process.env.NEXT_PUBLIC_SUPABASE_URL === 'your-project-url') {
-        return NextResponse.redirect(new URL('/login', request.url));
+        if (request.nextUrl.pathname.startsWith('/dashboard')) {
+            return NextResponse.redirect(new URL('/login?error=config_missing', request.url));
+        }
+        // Allow access to other pages (like login) so we don't cause infinite loop
+        return NextResponse.next();
     }
 
     let response = NextResponse.next({
