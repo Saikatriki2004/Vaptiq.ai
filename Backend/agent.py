@@ -11,9 +11,9 @@ from typing import List, Optional
 import xmltodict
 
 # Import centralized models
-from .models import ScanTarget, Vulnerability, ScanResult
-from .verifier_agent import VerifierAgent, SuspectedVuln
-from .db_logger import DatabaseLogger
+from models import ScanTarget, Vulnerability, ScanResult
+from verifier_agent import VerifierAgent, SuspectedVuln
+from db_logger import DatabaseLogger
 
 # --- Tool Registry ---
 # Maps TargetType to a list of Tool Functions
@@ -234,6 +234,11 @@ class SecurityAgent:
             # Run them all in parallel, but Semaphore limits active ones to 2
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
+            # Check for cancellations
+            for res in results:
+                if isinstance(res, asyncio.CancelledError):
+                    raise res
+
             self.logger.update_progress(60)
 
             # 3. Aggregation & Deduplication

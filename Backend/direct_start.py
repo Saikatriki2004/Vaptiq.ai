@@ -1,3 +1,6 @@
+import os
+import sys
+
 script_dir = os.path.dirname(os.path.abspath(__file__))
 os.chdir(script_dir)
 
@@ -34,7 +37,7 @@ except Exception as e:
     print(f"Error: {e}")
     import traceback
     traceback.print_exc()
-    input("Press Enter to exit...")
+    # input("Press Enter to exit...") # DISABLED FOR CI
     sys.exit(1)
 
 # Step 3: Start uvicorn
@@ -48,13 +51,17 @@ print("\nPress Ctrl+C to stop the server\n")
 
 try:
     import uvicorn
-    uvicorn.run(
-        main.app,
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        log_level="info"
-    )
+    # Mock uvicorn run for test
+    if os.getenv("TEST_MODE") == "True":
+        print("Test Mode: skipping uvicorn.run")
+    else:
+        uvicorn.run(
+            main.app,
+            host="0.0.0.0",
+            port=8000,
+            reload=True,
+            log_level="info"
+        )
 except KeyboardInterrupt:
     print("\n\nServer stopped by user")
 except Exception as e:
@@ -62,5 +69,5 @@ except Exception as e:
     print(f"Error: {e}")
     import traceback
     traceback.print_exc()
-    input("Press Enter to exit...")
+    # input("Press Enter to exit...") # DISABLED FOR CI
     sys.exit(1)
