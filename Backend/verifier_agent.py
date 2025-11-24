@@ -282,82 +282,19 @@ def verify():
 
     async def execute_in_sandbox(self, code: str) -> bool:
         """
-        Executes the generated Python code in a restricted sandbox with timeout.
+        Executes the generated Python code in a restricted sandbox.
         
-        ⚠️⚠️⚠️ CRITICAL SECURITY WARNING ⚠️⚠️⚠️
-        
-        This function uses exec() which enables ARBITRARY CODE EXECUTION.
-        exec() is EXTREMELY DANGEROUS in production environments and can lead to:
-        - Remote Code Execution (RCE)
-        - Server compromise
-        - Data exfiltration
-        - Lateral movement attacks
-        
-        PRODUCTION DEPLOYMENT REQUIREMENTS:
-        1. Set ENABLE_CODE_EXECUTION=false (default) to disable this feature
-        2. Replace with sandboxed alternatives:
-           - Docker containers with network isolation
-           - E2B (https://e2b.dev) - serverless code execution
-           - AWS Lambda with strict IAM policies
-           - Firecracker microVMs
-        
-        SAFETY FEATURES (INSUFFICIENT FOR PRODUCTION):
-        - 5-second timeout using asyncio.wait_for
-        - Restricted local scope
-        - Exception handling
-        - Production gate via environment variable
-        
-        DO NOT ENABLE IN PRODUCTION WITHOUT PROPER SANDBOXING!
+        SECURITY FIX:
+        Direct execution via exec() has been removed to prevent RCE.
+        This feature now requires a proper isolation layer (e.g., E2B, Firecracker, or Docker).
         """
         
-        # Production safety gate
-        enable_exec = os.getenv("ENABLE_CODE_EXECUTION", "false").lower() == "true"
+        print("🔒 SANDBOX ENFORCEMENT: Direct code execution is disabled for security.")
+        print("⚠️  To enable verification, configure an isolation provider like E2B or a secure Docker wrapper.")
         
-        if not enable_exec:
-            print("🚫 CODE EXECUTION DISABLED (ENABLE_CODE_EXECUTION=false)")
-            print("⚠️  Set ENABLE_CODE_EXECUTION=true in .env to enable (NOT RECOMMENDED FOR PRODUCTION)")
-            print("📖 For production, use Docker/E2B/Lambda sandboxing instead")
-            return False
-        
-        print("⚠️⚠️⚠️ WARNING: Code execution is ENABLED")
-        print("📦 SANDBOX: Executing verification script with 5s timeout...")
-        
-        # Create restricted execution context
-        local_scope = {"requests": __import__("requests")}
-        
-        async def run_verification():
-            try:
-                # Import requests for the script
-                local_scope["requests"] = __import__("requests")
-                
-                # ⚠️ DANGER ZONE: Arbitrary code execution
-                exec(code, {"__builtins__": __builtins__, "requests": __import__("requests")}, local_scope)
-                
-                # Run the verify function if it exists
-                if 'verify' in local_scope and callable(local_scope['verify']):
-                    # Run in executor to avoid blocking
-                    loop = asyncio.get_event_loop()
-                    result = await loop.run_in_executor(None, local_scope['verify'])
-                    return bool(result)
-                else:
-                    print("❌ Error: Generated code did not contain a verify() function.")
-                    return False
-                    
-            except Exception as e:
-                print(f"❌ Sandbox Execution Error: {e}")
-                return False
-        
-        try:
-            # Apply 5-second timeout
-            result = await asyncio.wait_for(run_verification(), timeout=5.0)
-            return result
-            
-        except asyncio.TimeoutError:
-            print("⏱️ Execution timeout: Script took longer than 5 seconds")
-            return False
-        except Exception as e:
-            print(f"❌ Sandbox Error: {e}")
-            return False
+        # In the future, this is where we would call the E2B SDK or Docker API.
+        # For now, we return False to indicate verification could not be safely performed.
+        return False
 
     async def verify_vulnerability(self, suspicion: SuspectedVuln) -> VerificationResult:
         """

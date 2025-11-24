@@ -2,6 +2,7 @@ from fpdf import FPDF
 from datetime import datetime
 import json
 from io import BytesIO
+from jinja2 import Template
 
 class PDFReport(FPDF):
     def header(self):
@@ -159,71 +160,51 @@ class ReportGenerator:
 
     @staticmethod
     def generate_html(scan_result):
-        import html as html_module
-        
-        # Escape user-controlled fields to prevent XSS
-        safe_target = html_module.escape(str(scan_result.get('target', '')))
-        safe_timestamp = html_module.escape(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-        
-        html = f"""
+        # Use Jinja2 Template to prevent XSS via auto-escaping
+        template_str = """
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Vaptiq.ai Report - {safe_target}</title>
+            <title>Vaptiq.ai Report - {{ target }}</title>
             <style>
-                body {{ background-color: #09090b; color: #e4e4e7; font-family: system-ui, sans-serif; padding: 40px; line-height: 1.5; }}
-                .container {{ max-width: 900px; margin: 0 auto; }}
-                h1 {{ color: #10b981; font-size: 2.5rem; margin-bottom: 0.5rem; }}
-                .meta {{ color: #a1a1aa; margin-bottom: 3rem; }}
-                .finding {{ background-color: #18181b; padding: 24px; margin-bottom: 24px; border-radius: 12px; border: 1px solid #27272a; }}
-                .finding h3 {{ margin-top: 0; display: flex; align-items: center; gap: 12px; }}
-                .badge {{ padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: bold; }}
-                .critical {{ background-color: rgba(239, 68, 68, 0.1); color: #ef4444; }}
-                .high {{ background-color: rgba(249, 115, 22, 0.1); color: #f97316; }}
-                .medium {{ background-color: rgba(234, 179, 8, 0.1); color: #eab308; }}
-                .low {{ background-color: rgba(59, 130, 246, 0.1); color: #3b82f6; }}
-                .proof {{ background-color: #000; padding: 16px; font-family: monospace; border-radius: 6px; border: 1px solid #27272a; margin-top: 16px; white-space: pre-wrap; color: #10b981; }}
-                .footer {{ margin-top: 60px; text-align: center; color: #52525b; font-size: 0.875rem; }}
+                body { background-color: #09090b; color: #e4e4e7; font-family: system-ui, sans-serif; padding: 40px; line-height: 1.5; }
+                .container { max-width: 900px; margin: 0 auto; }
+                h1 { color: #10b981; font-size: 2.5rem; margin-bottom: 0.5rem; }
+                .meta { color: #a1a1aa; margin-bottom: 3rem; }
+                .finding { background-color: #18181b; padding: 24px; margin-bottom: 24px; border-radius: 12px; border: 1px solid #27272a; }
+                .finding h3 { margin-top: 0; display: flex; align-items: center; gap: 12px; }
+                .badge { padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: bold; }
+                .critical { background-color: rgba(239, 68, 68, 0.1); color: #ef4444; }
+                .high { background-color: rgba(249, 115, 22, 0.1); color: #f97316; }
+                .medium { background-color: rgba(234, 179, 8, 0.1); color: #eab308; }
+                .low { background-color: rgba(59, 130, 246, 0.1); color: #3b82f6; }
+                .proof { background-color: #000; padding: 16px; font-family: monospace; border-radius: 6px; border: 1px solid #27272a; margin-top: 16px; white-space: pre-wrap; color: #10b981; }
+                .footer { margin-top: 60px; text-align: center; color: #52525b; font-size: 0.875rem; }
             </style>
         </head>
         <body>
             <div class="container">
                 <h1>Vaptiq.ai Report</h1>
                 <div class="meta">
-                    <p>Target: <strong>{safe_target}</strong></p>
-                    <p>Date: {safe_timestamp}</p>
+                    <p>Target: <strong>{{ target }}</strong></p>
+                    <p>Date: {{ timestamp }}</p>
                 </div>
                 
                 <h2>Detailed Findings</h2>
-                """
-        
-        # Build findings HTML with proper escaping to prevent XSS
-        for f in scan_result.get('findings', []):
-            severity = str(f.get("severity", "LOW"))
-            severity_lower = severity.lower()
-            
-            # Escape all user-controlled fields
-            safe_severity = html_module.escape(severity)
-            safe_type = html_module.escape(str(f.get("type", "")))
-            safe_description = html_module.escape(str(f.get("description", "")))
-            
-            proof_html = ""
-            if f.get("proof"):
-                safe_proof = html_module.escape(str(f.get("proof")))
-                proof_html = f'<div class="proof">PROOF OF EXPLOIT:<br>{safe_proof}</div>'
-            
-            html += f"""
+
+                {% for finding in findings %}
                 <div class="finding">
                     <h3>
-                        <span class="badge {severity_lower}">{safe_severity}</span>
-                        {safe_type}
+                        <span class="badge {{ finding.severity|lower }}">{{ finding.severity }}</span>
+                        {{ finding.type }}
                     </h3>
-                    <p>{safe_description}</p>
-                    {proof_html}
+                    <p>{{ finding.description }}</p>
+                    {% if finding.proof %}
+                    <div class="proof">PROOF OF EXPLOIT:<br>{{ finding.proof }}</div>
+                    {% endif %}
                 </div>
-                """
-        
-        html += """
+                {% endfor %}
+
                 <div class="footer">
                     CONFIDENTIAL - Generated by Vaptiq.ai
                 </div>
@@ -231,6 +212,14 @@ class ReportGenerator:
         </body>
         </html>
         """
+
+        template = Template(template_str, autoescape=True)
+        html = template.render(
+            target=scan_result.get('target', ''),
+            timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            findings=scan_result.get('findings', [])
+        )
+
         return BytesIO(html.encode('utf-8'))
 
     @staticmethod

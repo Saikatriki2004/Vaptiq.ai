@@ -8,9 +8,9 @@ from datetime import datetime
 from typing import List, Optional
 
 # Import centralized models
-from .models import ScanTarget, Vulnerability, ScanResult
-from .verifier_agent import VerifierAgent, SuspectedVuln
-from .db_logger import DatabaseLogger
+from models import ScanTarget, Vulnerability, ScanResult
+from verifier_agent import VerifierAgent, SuspectedVuln
+from db_logger import DatabaseLogger
 
 # --- Tool Registry ---
 # Maps TargetType to a list of Tool Functions
@@ -22,18 +22,59 @@ TOOL_REGISTRY = {
 
 # --- Mock Tool Implementations ---
 async def run_nmap_scan(target: str) -> List[Vulnerability]:
-    """Mock Nmap scan tool"""
-    await asyncio.sleep(2)
-    if random.random() > 0.5:
+    """Run actual Nmap scan tool"""
+    import shutil
+    nmap_path = shutil.which("nmap")
+
+    if not nmap_path:
         return [
             Vulnerability(
-                title="Open Port 22 (SSH)",
+                title="Configuration Error",
                 severity="LOW",
-                description="SSH port is open. Ensure strong authentication.",
-                remediation="Disable password auth, use keys."
+                description="Nmap is not installed on the server.",
+                remediation="Install nmap package."
             )
         ]
-    return []
+
+    try:
+        # Run actual nmap command
+        # Using -F for fast scan + vuln scripts
+        proc = await asyncio.create_subprocess_exec(
+            nmap_path, "-sV", "--script", "vuln", "-F", target,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await proc.communicate()
+        output = stdout.decode()
+
+        findings = []
+        if "VULNERABLE" in output:
+             findings.append(Vulnerability(
+                 title="Nmap Detected Vulnerabilities",
+                 severity="HIGH",
+                 description=f"Nmap scripts detected potential vulnerabilities.",
+                 remediation="Investigate nmap output for specific patches.",
+                 proof_of_exploit=output
+             ))
+        elif "open" in output:
+             findings.append(Vulnerability(
+                 title="Open Ports Detected",
+                 severity="LOW",
+                 description=f"Nmap found open ports on the target.",
+                 remediation="Ensure only necessary ports are open.",
+                 proof_of_exploit=output
+             ))
+
+        return findings
+    except Exception as e:
+        return [
+            Vulnerability(
+                title="Tool Execution Error",
+                severity="LOW",
+                description=f"Nmap failed to run: {str(e)}",
+                remediation="Check server logs."
+            )
+        ]
 
 
 async def run_zap_spider(target: str) -> List[Vulnerability]:

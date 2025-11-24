@@ -13,6 +13,8 @@ RUN apt-get update && apt-get install -y \
     dnsutils \
     whois \
     iputils-ping \
+    nodejs \
+    npm \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. Setup Work Directory
@@ -32,4 +34,5 @@ COPY Backend/ .
 # 6. Run the API
 # Expose port 8000 for the frontend/host to connect
 EXPOSE 8000
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run Prisma migration before starting the app
+CMD sh -c "npx prisma db push --schema=./prisma/schema.prisma && uvicorn main:app --host 0.0.0.0 --port 8000"
