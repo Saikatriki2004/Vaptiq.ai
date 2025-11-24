@@ -11,9 +11,9 @@ from typing import List, Optional
 import xmltodict
 
 # Import centralized models
-from .models import ScanTarget, Vulnerability, ScanResult
-from .verifier_agent import VerifierAgent, SuspectedVuln
-from .db_logger import DatabaseLogger
+from models import ScanTarget, Vulnerability, ScanResult
+from verifier_agent import VerifierAgent, SuspectedVuln
+from db_logger import DatabaseLogger
 
 # --- Tool Registry ---
 # Maps TargetType to a list of Tool Functions
@@ -27,23 +27,16 @@ TOOL_REGISTRY = {
 async def run_nmap_scan(target: str) -> List[Vulnerability]:
     """
     EXECUTING REAL NMAP BINARY
-    Runs actual Nmap scan with XML output and parses results.
     """
-    print(f"⚔️ Executing Nmap on {target}...")
+    print(f"🚀 Executing Nmap on {target}...")
     
-    # Check if nmap is installed
+    # Check if nmap is installed (It is in our Dockerfile)
     nmap_path = shutil.which("nmap")
     if not nmap_path:
-        print("⚠️ Nmap not found on server")
-        return [Vulnerability(
-            title="Configuration Error",
-            severity="LOW",
-            description="Nmap not found on server",
-            remediation="Install Nmap: apt-get install nmap (Linux) or download from nmap.org"
-        )]
+        return [Vulnerability(title="Config Error", severity="LOW", description="Nmap not installed", remediation="Install Nmap")]
 
-    # Run Nmap with XML output (-oX -)
-    # -sV: Version detection, -T4: Fast timing, --top-ports 100: Quick scan
+    # Safe Subprocess Execution
+    # -sV: Version Detection, -T4: Fast, --top-ports 100: Quick Scan
     cmd = [nmap_path, "-sV", "-T4", "--top-ports", "100", "-oX", "-", target]
     
     try:
@@ -55,41 +48,39 @@ async def run_nmap_scan(target: str) -> List[Vulnerability]:
         stdout, stderr = await process.communicate()
         
         if process.returncode != 0:
-            raise Exception(f"Nmap failed: {stderr.decode()}")
+            print(f"Nmap Stderr: {stderr.decode()}")
+            return []
 
-        # Parse XML Output
+        # Parse XML
         data = xmltodict.parse(stdout)
-        vulnerabilities = []
+        vulns = []
         
-        # Logic to extract open ports
-        hosts = data.get('nmaprun', {}).get('host', [])
-        if isinstance(hosts, dict):
-            hosts = [hosts]  # Handle single host case
+        # Robust XML Traversal
+        nmap_run = data.get('nmaprun', {})
+        hosts = nmap_run.get('host', [])
+        if isinstance(hosts, dict): hosts = [hosts]
         
         for host in hosts:
             ports = host.get('ports', {}).get('port', [])
-            if isinstance(ports, dict):
-                ports = [ports]
+            if isinstance(ports, dict): ports = [ports]
             
             for port in ports:
                 state = port.get('state', {}).get('@state')
                 if state == 'open':
                     service = port.get('service', {}).get('@name', 'unknown')
-                    version = port.get('service', {}).get('@product', '')
-                    port_id = port.get('@portid', 'unknown')
+                    product = port.get('service', {}).get('@product', '')
+                    port_id = port.get('@portid')
                     
-                    vulnerabilities.append(Vulnerability(
-                        title=f"Open Port: {port_id} ({service})",
-                        severity="LOW",
-                        description=f"Port {port_id} is open running {service} {version}",
-                        remediation="Close port if not needed or ensure service is patched."
+                    vulns.append(Vulnerability(
+                        title=f"Open Port {port_id} ({service})",
+                        severity="INFO",
+                        description=f"Port {port_id} is open. Service: {service} {product}",
+                        remediation="Close if unnecessary."
                     ))
-                    
-        print(f"✅ Nmap scan complete. Found {len(vulnerabilities)} open ports.")
-        return vulnerabilities
+        return vulns
 
     except Exception as e:
-        print(f"❌ Nmap Error: {e}")
+        print(f"❌ Nmap Crash: {e}")
         return []
 
 
@@ -234,6 +225,11 @@ class SecurityAgent:
             # Run them all in parallel, but Semaphore limits active ones to 2
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
+            # Check for cancellations
+            for res in results:
+                if isinstance(res, asyncio.CancelledError):
+                    raise res
+
             self.logger.update_progress(60)
 
             # 3. Aggregation & Deduplication
