@@ -24,26 +24,69 @@ TOOL_REGISTRY = {
 }
 
 # --- Real Nmap Tool Implementation ---
-async def run_nmap_scan(target: str) -> List[Vulnerability]:
+async def run_nmap_scan(target: str, dry_run: bool = False) -> List[Vulnerability]:
     """
-    EXECUTING REAL NMAP BINARY
-    Runs actual Nmap scan with XML output and parses results.
+    Nmap Scanner Wrapper.
+    Supports 'Dry Run' to validate infrastructure without attacking.
     """
-    print(f"⚔️ Executing Nmap on {target}...")
-    
-    # Check if nmap is installed
+    # 1. Infrastructure Check (Always Run)
     nmap_path = shutil.which("nmap")
     if not nmap_path:
-        print("⚠️ Nmap not found on server")
         return [Vulnerability(
-            title="Configuration Error",
-            severity="LOW",
-            description="Nmap not found on server",
-            remediation="Install Nmap: apt-get install nmap (Linux) or download from nmap.org"
+            title="Scanner Configuration Error",
+            severity="CRITICAL",
+            description="Nmap binary is missing from the worker container.",
+            remediation="Install nmap in the Dockerfile.",
+            status="FALSE_POSITIVE"
         )]
 
-    # Run Nmap with XML output (-oX -)
-    # -sV: Version detection, -T4: Fast timing, --top-ports 100: Quick scan
+    # 2. Dry Run Mode (Fast, Safe, Non-Destructive)
+    if dry_run:
+        # We just check if we can resolve the target, or simple ping
+        try:
+            # Simple ping check (1 packet, 1 second timeout)
+            # Cross-platform: Windows uses -n, Linux/macOS uses -c
+            import platform
+            if platform.system() == "Windows":
+                ping_cmd = ["ping", "-n", "1", "-w", "1000", target]
+            else:
+                ping_cmd = ["ping", "-c", "1", "-W", "1", target]
+            
+            proc = await asyncio.create_subprocess_exec(
+                *ping_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await proc.communicate()
+            
+            if proc.returncode == 0:
+                return [Vulnerability(
+                    title="Dry Run Successful",
+                    severity="INFO",
+                    description=f"Target {target} is reachable and Nmap is installed.",
+                    remediation="System is ready for full scan.",
+                    status="CONFIRMED"
+                )]
+            else:
+                return [Vulnerability(
+                    title="Target Unreachable",
+                    severity="LOW",
+                    description=f"Could not ping {target}. Firewall may be blocking.",
+                    remediation="Check network connectivity.",
+                    status="SUSPECTED"
+                )]
+        except Exception as e:
+            return [Vulnerability(
+                title="Dry Run Failed",
+                severity="LOW",
+                description=f"Execution error: {str(e)}",
+                remediation="Check worker logs.",
+                status="SUSPECTED"
+            )]
+
+    # 3. Real Execution Mode (The "Heavy" Scan)
+    # -sV: Version Detection, -T4: Fast timing
+    print(f"⚔️ Executing Nmap on {target}...")
     cmd = [nmap_path, "-sV", "-T4", "--top-ports", "100", "-oX", "-", target]
     
     try:
@@ -55,20 +98,23 @@ async def run_nmap_scan(target: str) -> List[Vulnerability]:
         stdout, stderr = await process.communicate()
         
         if process.returncode != 0:
-            raise Exception(f"Nmap failed: {stderr.decode()}")
+            # Log stderr but do not crash
+            print(f"Nmap Error: {stderr.decode()}")
+            return []
 
         # Parse XML Output
         data = xmltodict.parse(stdout)
         vulnerabilities = []
         
-        # Logic to extract open ports
-        hosts = data.get('nmaprun', {}).get('host', [])
-        if isinstance(hosts, dict):
-            hosts = [hosts]  # Handle single host case
+        # Handle XML parsing logic
+        nmap_run = data.get('nmaprun', {})
+        hosts = nmap_run.get('host', [])
+        if isinstance(hosts, dict): 
+            hosts = [hosts]
         
         for host in hosts:
             ports = host.get('ports', {}).get('port', [])
-            if isinstance(ports, dict):
+            if isinstance(ports, dict): 
                 ports = [ports]
             
             for port in ports:
@@ -76,21 +122,27 @@ async def run_nmap_scan(target: str) -> List[Vulnerability]:
                 if state == 'open':
                     service = port.get('service', {}).get('@name', 'unknown')
                     version = port.get('service', {}).get('@product', '')
-                    port_id = port.get('@portid', 'unknown')
+                    port_id = port.get('@portid')
                     
                     vulnerabilities.append(Vulnerability(
-                        title=f"Open Port: {port_id} ({service})",
-                        severity="LOW",
-                        description=f"Port {port_id} is open running {service} {version}",
-                        remediation="Close port if not needed or ensure service is patched."
+                        title=f"Open Port {port_id} ({service})",
+                        severity="INFO",
+                        description=f"Port is exposed.",
+                        remediation="Close if unused.",
+                        status="CONFIRMED"
                     ))
                     
         print(f"✅ Nmap scan complete. Found {len(vulnerabilities)} open ports.")
         return vulnerabilities
 
     except Exception as e:
-        print(f"❌ Nmap Error: {e}")
-        return []
+        return [Vulnerability(
+            title="Scan Execution Error",
+            severity="HIGH",
+            description=str(e),
+            remediation="Check worker logs.",
+            status="FAILED"
+        )]
 
 
 async def run_zap_spider(target: str) -> List[Vulnerability]:
@@ -173,12 +225,13 @@ class SecurityAgent:
         async with self.semaphore:
             await self._check_cancellation()
             
-            # SAFETY: Jitter (Random 0.5 - 3.0s) to prevent thundering herd / WAF bans
-            delay = random.uniform(0.5, 3.0)
-            self.logger.log("TOOL", f"Queuing {tool_name} (Delay: {delay:.1f}s)...")
-            await asyncio.sleep(delay)
+            # Jitter is only needed for real scans to avoid WAF bans
+            if not self.target.dry_run:
+                delay = random.uniform(0.5, 3.0)
+                self.logger.log("TOOL", f"Queuing {tool_name} (Delay: {delay:.1f}s)...")
+                await asyncio.sleep(delay)
 
-            self.logger.log("TOOL", f"Starting {tool_name}...")
+            self.logger.log("TOOL", f"Starting {tool_name} (Dry Run: {self.target.dry_run})...")
             
             try:
                 # Map tool name to actual function
@@ -196,7 +249,10 @@ class SecurityAgent:
                     return ScanResult(tool=tool_name, findings=[], error=f"Unknown tool: {tool_name}")
                 
                 # Execute the tool
-                findings = await tool_func(self.target.value)
+                if tool_name == "run_nmap_scan":
+                    findings = await tool_func(self.target.value, self.target.dry_run)
+                else:
+                    findings = await tool_func(self.target.value)
                 
                 self.logger.log("TOOL", f"Finished {tool_name}. Found {len(findings)} issues.")
                 return ScanResult(tool=tool_name, findings=findings)
