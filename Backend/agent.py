@@ -1,5 +1,10 @@
 """
 Refactored Security Agent with Tool Registry & Parallel Execution
+
+Security Enhancements:
+- Input sanitization to prevent command injection (CRITICAL-009)
+- SSRF protection to prevent internal network scanning
+- Parallel tool execution with rate limiting
 """
 import asyncio
 import random
@@ -14,6 +19,7 @@ import xmltodict
 from .models import ScanTarget, Vulnerability, ScanResult
 from .verifier_agent import VerifierAgent, SuspectedVuln
 from .db_logger import DatabaseLogger
+from .security import sanitize_target  # ✅ CRITICAL-009: Import sanitization
 
 # --- Tool Registry ---
 # Maps TargetType to a list of Tool Functions
@@ -24,11 +30,40 @@ TOOL_REGISTRY = {
 }
 
 # --- Real Nmap Tool Implementation ---
-async def run_nmap_scan(target: str, dry_run: bool = False) -> List[Vulnerability]:
+async def run_nmap_scan(target: str, target_type: str, dry_run: bool = False) -> List[Vulnerability]:
     """
-    Nmap Scanner Wrapper.
-    Supports 'Dry Run' to validate infrastructure without attacking.
+    Nmap Scanner Wrapper with SECURITY HARDENING.
+    
+    Security Features:
+    - ✅ Input sanitization prevents command injection (CRITICAL-009)
+    - ✅ SSRF protection blocks private IP scanning (HIGH SSRF)
+    - ✅ Supports 'Dry Run' for safe infrastructure validation
+    
+    Args:
+        target: Target URL, IP, or hostname
+        target_type: Type of target ("URL", "IP", "API")
+        dry_run: If True, only checks connectivity without full scan
+        
+    Returns:
+        List of detected vulnerabilities
     """
+    # ============================================================================
+    # CRITICAL SECURITY FIX: Sanitize Input to Prevent Command Injection & SSRF
+    # ============================================================================
+    try:
+        safe_target = sanitize_target(target, target_type)
+        print(f"🛡️ Target sanitized: {target} → {safe_target}")
+    except ValueError as e:
+        # Return security violation as a finding
+        return [Vulnerability(
+            title="Security Violation: Invalid Target",
+            severity="CRITICAL",
+            description=str(e),
+            remediation="Provide a valid public IP address or hostname. "
+                       "Private IP ranges and localhost are blocked for security.",
+            status="BLOCKED"
+        )]
+    
     # 1. Infrastructure Check (Always Run)
     nmap_path = shutil.which("nmap")
     if not nmap_path:
@@ -48,9 +83,9 @@ async def run_nmap_scan(target: str, dry_run: bool = False) -> List[Vulnerabilit
             # Cross-platform: Windows uses -n, Linux/macOS uses -c
             import platform
             if platform.system() == "Windows":
-                ping_cmd = ["ping", "-n", "1", "-w", "1000", target]
+                ping_cmd = ["ping", "-n", "1", "-w", "1000", safe_target]  # ✅ Use sanitized
             else:
-                ping_cmd = ["ping", "-c", "1", "-W", "1", target]
+                ping_cmd = ["ping", "-c", "1", "-W", "1", safe_target]  # ✅ Use sanitized
             
             proc = await asyncio.create_subprocess_exec(
                 *ping_cmd,
@@ -63,7 +98,7 @@ async def run_nmap_scan(target: str, dry_run: bool = False) -> List[Vulnerabilit
                 return [Vulnerability(
                     title="Dry Run Successful",
                     severity="INFO",
-                    description=f"Target {target} is reachable and Nmap is installed.",
+                    description=f"Target {safe_target} is reachable and Nmap is installed.",
                     remediation="System is ready for full scan.",
                     status="CONFIRMED"
                 )]
@@ -71,7 +106,7 @@ async def run_nmap_scan(target: str, dry_run: bool = False) -> List[Vulnerabilit
                 return [Vulnerability(
                     title="Target Unreachable",
                     severity="LOW",
-                    description=f"Could not ping {target}. Firewall may be blocking.",
+                    description=f"Could not ping {safe_target}. Firewall may be blocking.",
                     remediation="Check network connectivity.",
                     status="SUSPECTED"
                 )]
@@ -85,9 +120,9 @@ async def run_nmap_scan(target: str, dry_run: bool = False) -> List[Vulnerabilit
             )]
 
     # 3. Real Execution Mode (The "Heavy" Scan)
-    # -sV: Version Detection, -T4: Fast timing
-    print(f"⚔️ Executing Nmap on {target}...")
-    cmd = [nmap_path, "-sV", "-T4", "--top-ports", "100", "-oX", "-", target]
+    # ✅ SECURITY: Use sanitized target in command
+    print(f"⚔️ Executing Nmap on {safe_target}...")
+    cmd = [nmap_path, "-sV", "-T4", "--top-ports", "100", "-oX", "-", safe_target]
     
     try:
         process = await asyncio.create_subprocess_exec(
@@ -197,7 +232,7 @@ class SecurityAgent:
     """
     The Core Security Engine with Tool Registry & Parallel Execution.
     Orchestrates scanning tools and AI verification with safety controls.
-    """
+   """
     def __init__(self, target: ScanTarget, scan_id: str, redis_client):
         self.target = target
         self.scan_id = scan_id
@@ -248,9 +283,9 @@ class SecurityAgent:
                     self.logger.log("ERROR", f"Unknown tool: {tool_name}")
                     return ScanResult(tool=tool_name, findings=[], error=f"Unknown tool: {tool_name}")
                 
-                # Execute the tool
+                # Execute the tool with proper parameters
                 if tool_name == "run_nmap_scan":
-                    findings = await tool_func(self.target.value, self.target.dry_run)
+                    findings = await tool_func(self.target.value, self.target.type, self.target.dry_run)
                 else:
                     findings = await tool_func(self.target.value)
                 
