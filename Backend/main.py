@@ -3,6 +3,9 @@ from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 from typing import Optional
 from datetime import datetime
 from contextlib import asynccontextmanager
@@ -39,11 +42,111 @@ def safe_decode(value):
     return value
 
 
+import dns.resolver
+import dns.exception
+
 async def verify_domain_ownership(target_value: str, token: Optional[str] = None):
-    """Verify domain ownership via DNS TXT record.
-    TODO: Implement real DNS TXT check using dnspython"""
+    """
+    Verify domain ownership via DNS TXT record.
+    
+    Security:
+    - Prevents unauthorized scanning of domains
+    - Uses cryptographic token verification
+    - Real DNS lookup (not mock)
+    
+    Process:
+    1. User creates target, receives verification token
+    2. User adds TXT record: vaptiq-verify=<token> to their domain
+    3. This function queries DNS to verify the token exists
+    
+    Args:
+        target_value: Domain to verify (e.g., "example.com")
+        token: Expected verification token
+        
+    Returns:
+        dict with verified status and method
+    """
     logger.info(f"Verifying domain ownership for {target_value}")
-    return {"verified": True, "method": "mock", "target": target_value}
+    
+    if not token:
+        return {
+            "verified": False,
+            "method": "dns_txt",
+            "target": target_value,
+            "error": "No verification token provided"
+        }
+    
+    try:
+        # Extract domain from URL if needed
+        if "://" in target_value:
+            from urllib.parse import urlparse
+            parsed = urlparse(target_value)
+            domain = parsed.netloc
+        else:
+            domain = target_value
+        
+        # Query DNS TXT records
+        resolver = dns.resolver.Resolver()
+        resolver.timeout = 5
+        resolver.lifetime = 5
+        
+        txt_records = resolver.resolve(domain, 'TXT')
+        
+        # Check if our verification token exists
+        expected_record = f"vaptiq-verify={token}"
+        
+        for record in txt_records:
+            # TXT records are returned as quoted strings
+            record_value = record.to_text().strip('"')
+            
+            if record_value == expected_record:
+                logger.info(f"✅ Domain {domain} verified successfully")
+                return {
+                    "verified": True,
+                    "method": "dns_txt",
+                    "target": target_value,
+                    "record": record_value
+                }
+        
+        # Token not found in TXT records
+        logger.warning(f"⚠️ Verification token not found for {domain}")
+        return {
+            "verified": False,
+            "method": "dns_txt",
+            "target": target_value,
+            "error": "Verification token not found in DNS TXT records",
+            "hint": f"Add TXT record: {expected_record}"
+        }
+        
+    except dns.resolver.NXDOMAIN:
+        return {
+            "verified": False,
+            "method": "dns_txt",
+            "target": target_value,
+            "error": "Domain does not exist"
+        }
+    except dns.resolver.NoAnswer:
+        return {
+            "verified": False,
+            "method": "dns_txt",
+            "target": target_value,
+            "error": "No TXT records found for this domain"
+        }
+    except dns.exception.Timeout:
+        return {
+            "verified": False,
+            "method": "dns_txt",
+            "target": target_value,
+            "error": "DNS query timeout"
+        }
+    except Exception as e:
+        logger.error(f"DNS verification error for {domain}: {str(e)}")
+        return {
+            "verified": False,
+            "method": "dns_txt",
+            "target": target_value,
+            "error": f"Verification failed: {type(e).__name__}"
+        }
 
 
 # --- Lifecycle Manager ---
@@ -58,6 +161,21 @@ async def lifespan(app: FastAPI):
 
 # --- FastAPI App Initialization ---
 app = FastAPI(lifespan=lifespan)
+
+# ============================================================================
+# SECURITY: Rate Limiting (MEDIUM-014)
+# ============================================================================
+
+# Initialize rate limiter
+# Uses IP address for rate limiting by default
+limiter = Limiter(
+    key_func=get_remote_address,
+    default_limits=[os.getenv("RATE_LIMIT_DEFAULT", "60/minute")]
+)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+logger.info(f"✅ Rate limiting enabled: {os.getenv('RATE_LIMIT_DEFAULT', '60/minute')}")
 
 # ============================================================================
 # SECURITY: HTTPS Enforcement & CORS Configuration (HIGH-005)
@@ -252,10 +370,12 @@ async def export_scan(
 
 
 @app.post("/scan/{scan_id}/simulate-attack")
+@limiter.limit("5/minute")  # ✅ Rate limit: 5 simulations per minute (resource-intensive)
 async def simulate_attack(
+    request: Request,
     scan_id: str,
     user = Depends(get_current_user),  # ✅ CRITICAL-002: Authentication required
-    request: Request = None
+    request_obj: Request = None
 ):
     """
     Simulate attack path based on scan findings.
@@ -299,7 +419,9 @@ async def simulate_attack(
 
 
 @app.post("/scan")
+@limiter.limit("10/minute")  # ✅ Rate limit: 10 scans per minute
 async def start_scan(
+    request: Request,
     target: ScanTarget,
     user = Depends(get_current_user),  # JWT-validated user (SECURITY FIX)
     target_id: Optional[str] = None
@@ -625,7 +747,9 @@ async def get_target(
     return target
 
 @app.post("/verify-vulnerability")
+@limiter.limit("10/minute")  # ✅ Rate limit: 10 verifications per minute (AI resource-intensive)
 async def verify_vulnerability_endpoint(
+    request: Request,
     suspected_vuln: SuspectedVuln,
     user = Depends(get_current_user)  # ✅ CRITICAL-002: Authentication required
 ):

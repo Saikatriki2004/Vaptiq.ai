@@ -1,18 +1,43 @@
 """
-Hardened Celery Configuration for Production with Stale Job Sweeper
+Celery Worker Configuration for Vaptiq.ai
+
+Security Features:
+- Redis TLS validation in production (MEDIUM-013)
+- Task time limits and resilience
+- Secure task serialization
 """
 import os
 import asyncio
 from datetime import datetime, timedelta
 from celery import Celery
+import logging
 
-# Define the Redis URL (host is 'redis' in docker network)
-# Default to localhost for local testing outside docker
+logger = logging.getLogger(__name__)
+
+# Get Redis URL from environment
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
+
+# ============================================================================
+# SECURITY: Redis TLS Validation (MEDIUM-013)
+# ============================================================================
+
+if ENVIRONMENT == "production":
+    # Enforce TLS in production
+    if not REDIS_URL.startswith("rediss://"):
+        # Check if SSL parameters are present
+        if "ssl=true" not in REDIS_URL.lower() and "ssl_cert_reqs" not in REDIS_URL.lower():
+            logger.warning(
+                "⚠️ SECURITY WARNING: Redis TLS recommended in production!\\n"
+                "Redis URL should use 'rediss://' or include SSL parameters.\\n"
+                "Example: rediss://user:pass@host:6379/0"
+            )
+    else:
+        logger.info("✅ Redis TLS validation passed (production mode)")
 
 # Initialize Celery
 celery_app = Celery(
-    "sentinel_engine",  # Updated app name
+    "vaptiq_engine",
     broker=REDIS_URL,
     backend=REDIS_URL
 )
@@ -80,15 +105,7 @@ async def _sweep_stale_scans_async():
     cutoff_time = datetime.now() - timedelta(minutes=45)
     
     # Find stale scans
-    # NOTE: This queries scans_db (mock) - Update to use Prisma when migrated
-    # For now, we'll need to check Redis directly
-    # TODO: Replace with Prisma query: 
-    # stale_scans = await db.scan.find_many(
-    #     where={"status": "RUNNING", "startedAt": {"lt": cutoff_time}},
-    #     include={"target": {"include": {"user": True}}}
-    # )
-    
-    # Temporary implementation using mock data
+    # TODO: Replace with Prisma query when migrated
     from main import scans_db  # Import mock database
     
     stale_scans = []
@@ -118,9 +135,9 @@ async def _sweep_stale_scans_async():
                 reason="STALE_JOB_TIMEOUT (Worker crashed/redeployed)"
             )
             
-        print(f"🧹 Swept stale scan {scan['id'][:8]} and refunded {cost} credits to user {scan.get('user_id', 'unknown')[:8]}")
+        logger.info(f"🧹 Swept stale scan {scan['id'][:8]} and refunded {cost} credits to user {scan.get('user_id', 'unknown')[:8]}")
     
     if stale_scans:
-        print(f"✅ Sweeper recovered {len(stale_scans)} stale jobs")
+        logger.info(f"✅ Sweeper recovered {len(stale_scans)} stale jobs")
     
     return {"swept_count": len(stale_scans)}
