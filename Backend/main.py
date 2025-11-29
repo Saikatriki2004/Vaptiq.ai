@@ -1,5 +1,5 @@
 # --- Imports ---
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from typing import Optional
@@ -19,6 +19,7 @@ from tasks import run_background_scan
 from agent import ScanTarget
 from db_logger import DatabaseLogger
 from db import db, connect_db, disconnect_db
+from auth import get_current_user  # JWT authentication
 
 # --- Logging Configuration ---
 logging.basicConfig(
@@ -181,14 +182,69 @@ async def simulate_attack(scan_id: str):
 
 
 @app.post("/scan")
-async def start_scan(target: ScanTarget, target_id: Optional[str] = None):
+async def start_scan(
+    target: ScanTarget,
+    user = Depends(get_current_user),  # JWT-validated user (SECURITY FIX)
+    target_id: Optional[str] = None
+):
     """
     Start a vulnerability scan on a target.
-    Dispatches job to Celery worker.
+    
+    Security Features:
+    - JWT authentication prevents user_id forgery
+    - Atomic credit deduction prevents race conditions
+    - Monthly budget caps prevent runaway costs
+    - Complete audit trail via CreditTransaction
+    
+    Cost Structure:
+    - Dry run: 0 credits (free connectivity test)
+    - Full scan: 10 credits
     """
-    # Check if target requires verification (URL type)
+    from auth import get_current_user
+    
+    # 1. Calculate Scan Cost
+    cost = 0 if target.dry_run else 10
+    
+    # 2. Check Monthly Budget Cap (Tier-based limits)
+    tier_limits = {
+        "FREE": {"monthly_cap": 50.0},
+        "PRO": {"monthly_cap": 500.0},
+        "ENTERPRISE": {"monthly_cap": 5000.0}  # Safety cap - never unlimited!
+    }
+    
+    user_tier_limit = tier_limits.get(user.tier, tier_limits["FREE"])
+    if user.monthlySpent >= user_tier_limit["monthly_cap"]:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Monthly budget cap reached ({user_tier_limit['monthly_cap']} credits). Contact support or upgrade tier."
+        )
+    
+    # 3. ATOMIC CREDIT DEDUCTION (CRITICAL - Prevents Race Condition)
+    # Only proceeds if credits >= cost. Returns None if condition fails.
+    updated_user = await db.user.update(
+        where={
+            "id": user.id,
+            "credits": {"gte": cost}  # Atomic condition check
+        },
+        data={
+            "credits": {"decrement": cost}
+        }
+    )
+    
+    if not updated_user:
+        raise HTTPException(
+            status_code=402,
+            detail=f"Insufficient credits. You have {user.credits} credits but need {cost}."
+        )
+    
+    # 4. Check if target requires verification (URL type)
     if target.type == "URL":
         if not target_id or target_id not in mock_targets_db:
+            # REFUND if verification fails
+            await db.user.update(
+                where={"id": user.id},
+                data={"credits": {"increment": cost}}
+            )
             raise HTTPException(
                 status_code=400,
                 detail="URL targets must be created and verified before scanning. Please create a target first."
@@ -196,33 +252,51 @@ async def start_scan(target: ScanTarget, target_id: Optional[str] = None):
         
         target_data = mock_targets_db[target_id]
         if not target_data["is_verified"]:
+            # REFUND if verification fails
+            await db.user.update(
+                where={"id": user.id},
+                data={"credits": {"increment": cost}}
+            )
             raise HTTPException(
                 status_code=403,
                 detail=f"Domain verification required. Please verify ownership of {target.value} before scanning."
             )
     
+    # 5. Create Scan Record in Database
     scan_id = str(uuid.uuid4())
-    
-    # 1. Create DB Entry (Status: QUEUED)
-    # Pydantic v2 compatibility: use model_dump if available, fallback to dict
     target_data = target.model_dump(mode='json') if hasattr(target, 'model_dump') else target.dict()
     
+    # Store in mock DB (TODO: Replace with Prisma)
     scans_db[scan_id] = {
         "scan_id": scan_id,
         "status": "QUEUED",
         "target": target_data,
         "target_id": target_id,
+        "user_id": user.id,
         "created_at": datetime.now()
     }
     
-    # 2. Dispatch to Redis/Celery
-    task = run_background_scan.delay(target_data, scan_id)
+    # 6. Log Credit Transaction (Audit Trail)
+    await db.credittransaction.create(data={
+        "userId": user.id,
+        "amount": -cost,
+        "type": "SCAN_START",
+        "scanId": scan_id,
+        "reason": f"Started {'dry run' if target.dry_run else 'full'} scan on {target.value}"
+    })
+    
+    # 7. Dispatch to Celery Worker
+    task = run_background_scan.delay(target_data, scan_id, user.id)  # Pass user_id for refunds
+    
+    logger.info(f"✅ Scan {scan_id} queued for user {user.email}. Credits: {updated_user.credits} (-{cost})")
     
     return {
         "scan_id": scan_id,
         "status": "QUEUED",
         "task_id": task.id,
-        "message": "Scan queued in background."
+        "credits_remaining": updated_user.credits,
+        "cost": cost,
+        "message": f"Scan queued in background. {updated_user.credits} credits remaining."
     }
 
 @app.get("/scans")
@@ -363,6 +437,34 @@ async def verify_vulnerability_endpoint(suspected_vuln: SuspectedVuln):
     """
     result = await verifier_agent.verify_vulnerability(suspected_vuln)
     return result
+
+@app.get("/api/user/credits")
+async def get_user_credits(user = Depends(get_current_user)):
+    """
+    Get current user's credit balance and tier information.
+    
+    Returns:
+        - credits: Current credit balance
+        - tier: User subscription tier (FREE, PRO, ENTERPRISE)
+        - monthly_spent: Credits spent this month
+        - monthly_cap: Monthly spending limit for user's tier
+        - monthly_reset_date: When monthly counter resets
+    """
+    tier_limits = {
+        "FREE": {"monthly_cap": 50.0},
+        "PRO": {"monthly_cap": 500.0},
+        "ENTERPRISE": {"monthly_cap": 5000.0}
+    }
+    
+    user_tier_limit = tier_limits.get(user.tier, tier_limits["FREE"])
+    
+    return {
+        "credits": user.credits,
+        "tier": user.tier,
+        "monthly_spent": user.monthlySpent,
+        "monthly_cap": user_tier_limit["monthly_cap"],
+        "monthly_reset_date": user.monthlyResetDate.isoformat()
+    }
 
 @app.get("/")
 async def root():

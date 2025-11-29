@@ -8,12 +8,21 @@ datasource db {
 }
 
 model User {
-  id        String   @id @default(uuid())
-  email     String   @unique
-  role      String   @default("USER")
-  targets   Target[]
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id               String              @id @default(uuid())
+  email            String              @unique
+  role             String              @default("USER")
+  
+  // Financial Controls (Bankruptcy Prevention)
+  credits          Int                 @default(50)        // Pre-paid scan credits
+  tier             String              @default("FREE")    // FREE, PRO, ENTERPRISE
+  totalSpent       Float               @default(0.0)       // Lifetime cost tracking (USD)
+  monthlySpent     Float               @default(0.0)       // Current month spending (USD)
+  monthlyResetDate DateTime            @default(now())     // Reset monthly counter
+  
+  targets          Target[]
+  transactions     CreditTransaction[] // Audit trail
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
 }
 
 model Target {
@@ -65,4 +74,17 @@ model AgentLog {
   scan      Scan     @relation(fields: [scanId], references: [id])
   message   String
   timestamp DateTime @default(now())
+}
+
+model CreditTransaction {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  amount    Int      // -10 for scan deduction, +50 for purchase, +10 for refund
+  type      String   // "SCAN_START", "SCAN_REFUND_ERROR", "SCAN_REFUND_CANCELLED", "PURCHASE", "ADMIN_ADJUSTMENT"
+  scanId    String?  // Link to scan if applicable
+  reason    String?  // Optional explanation for refunds/adjustments
+  createdAt DateTime @default(now())
+  
+  @@index([userId, createdAt]) // For transaction history queries
 }
