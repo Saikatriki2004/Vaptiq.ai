@@ -5,11 +5,11 @@ import asyncio
 import redis
 import os
 from celery.exceptions import SoftTimeLimitExceeded
-from .celery_config import celery_app
-from .agent import SecurityAgent
-from .models import ScanTarget
-from .db_logger import DatabaseLogger
-from .db import db
+from celery_config import celery_app
+from agent import SecurityAgent
+from models import ScanTarget
+from db_logger import DatabaseLogger
+from db import db
 
 # Initialize Redis for the worker to read flags
 redis_client = redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"))

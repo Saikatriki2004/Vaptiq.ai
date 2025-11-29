@@ -76,7 +76,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Security(
         raise HTTPException(status_code=401, detail="Authentication failed")
 
 
-async def get_current_user_optional(credentials: HTTPAuthorizationCredentials | None = Security(security, auto_error=False)):
+async def get_current_user_optional(credentials: HTTPAuthorizationCredentials | None = Depends(HTTPBearer(auto_error=False))):
     """
     Optional authentication - returns None if no token provided.
     Useful for endpoints that work with or without auth.

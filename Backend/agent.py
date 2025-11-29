@@ -11,9 +11,10 @@ from typing import List, Optional
 import xmltodict
 
 # Import centralized models
-from .models import ScanTarget, Vulnerability, ScanResult
-from .verifier_agent import VerifierAgent, SuspectedVuln
-from .db_logger import DatabaseLogger
+from models import ScanTarget, Vulnerability, ScanResult
+from verifier_agent import VerifierAgent, SuspectedVuln
+from db_logger import DatabaseLogger
+from validators import is_safe_target
 
 # --- Tool Registry ---
 # Maps TargetType to a list of Tool Functions
@@ -85,6 +86,27 @@ async def run_nmap_scan(target: str, dry_run: bool = False) -> List[Vulnerabilit
             )]
 
     # 3. Real Execution Mode (The "Heavy" Scan)
+    # Security Check: SSRF (Should be caught by main.py, but defense in depth)
+    if not is_safe_target(target):
+         return [Vulnerability(
+            title="Scan Blocked",
+            severity="INFO",
+            description="Target is not a safe public IP/domain.",
+            remediation="Scan public targets only.",
+            status="BLOCKED"
+        )]
+
+    # Security Check: Command Injection
+    # Prevent argument injection (e.g. -iL /etc/passwd)
+    if target.startswith("-"):
+        return [Vulnerability(
+            title="Invalid Target",
+            severity="HIGH",
+            description="Target starts with illegal character '-'.",
+            remediation="Provide a valid hostname or IP.",
+            status="BLOCKED"
+        )]
+
     # -sV: Version Detection, -T4: Fast timing
     print(f"⚔️ Executing Nmap on {target}...")
     cmd = [nmap_path, "-sV", "-T4", "--top-ports", "100", "-oX", "-", target]

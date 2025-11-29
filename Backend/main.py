@@ -19,7 +19,8 @@ from tasks import run_background_scan
 from agent import ScanTarget
 from db_logger import DatabaseLogger
 from db import db, connect_db, disconnect_db
-from auth import get_current_user  # JWT authentication
+from auth import get_current_user, get_current_user_optional  # JWT authentication
+from validators import is_safe_target
 
 # --- Logging Configuration ---
 logging.basicConfig(
@@ -84,8 +85,23 @@ mock_targets_db = {}
 # --- Endpoints ---
 
 @app.get("/scan/{scan_id}/export")
-async def export_scan(scan_id: str, format: str = "pdf", severities: Optional[str] = None):
+async def export_scan(
+    scan_id: str,
+    format: str = "pdf",
+    severities: Optional[str] = None,
+    user = Depends(get_current_user)
+):
     """Export scan report in PDF, HTML, or JSON format."""
+    # 1. Verify Scan Ownership
+    scan_data = scans_db.get(scan_id)
+    if not scan_data:
+         # Try to find in DB (TODO: Replace with Prisma)
+         # For now, if not in mock, assume 404
+         raise HTTPException(status_code=404, detail="Scan not found")
+
+    if scan_data.get("user_id") != user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this scan")
+
     # Validate format parameter
     allowed_formats = {"pdf", "html", "json"}
     if format not in allowed_formats:
@@ -104,7 +120,7 @@ async def export_scan(scan_id: str, format: str = "pdf", severities: Optional[st
     # Mock data fallback for demo
     scan_result = {
         "id": scan_id,
-        "target": "https://example.com",
+        "target": scan_data.get("target", {}).get("value", "https://example.com"),
         "status": "completed",
         "timestamp": datetime.now().isoformat(),
         "findings": [
@@ -165,7 +181,15 @@ async def export_scan(scan_id: str, format: str = "pdf", severities: Optional[st
 
 
 @app.post("/scan/{scan_id}/simulate-attack")
-async def simulate_attack(scan_id: str):
+async def simulate_attack(scan_id: str, user = Depends(get_current_user)):
+    # 1. Verify Scan Ownership
+    scan_data = scans_db.get(scan_id)
+    if not scan_data:
+         raise HTTPException(status_code=404, detail="Scan not found")
+
+    if scan_data.get("user_id") != user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this scan")
+
     # Fetch findings from Redis/DB
     # For demo, using mock
     findings = [
@@ -237,7 +261,18 @@ async def start_scan(
             detail=f"Insufficient credits. You have {user.credits} credits but need {cost}."
         )
     
-    # 4. Check if target requires verification (URL type)
+    # 4. Validate Target for SSRF
+    if not is_safe_target(target.value):
+         await db.user.update(
+            where={"id": user.id},
+            data={"credits": {"increment": cost}}
+        )
+         raise HTTPException(
+            status_code=400,
+            detail="Invalid target. Private IPs, local networks, and reserved domains are not allowed."
+        )
+
+    # 5. Check if target requires verification (URL type)
     if target.type == "URL":
         if not target_id or target_id not in mock_targets_db:
             # REFUND if verification fails
@@ -300,7 +335,7 @@ async def start_scan(
     }
 
 @app.get("/scans")
-async def list_scans():
+async def list_scans(user = Depends(get_current_user)):
     """
     List all scans sorted by creation date (newest first).
     Includes real-time status and severity summary from Redis.
@@ -308,6 +343,10 @@ async def list_scans():
     scan_list = []
     
     for scan_id, scan_data in scans_db.items():
+        # Filter by user_id to prevent IDOR
+        if scan_data.get("user_id") != user.id:
+            continue
+
         # Get real-time data from Redis
         db_logger = DatabaseLogger(scan_id)
         redis_status_raw = db_logger.redis_client.get(f"scan:{scan_id}:status")
@@ -342,10 +381,15 @@ async def list_scans():
     return scan_list
 
 @app.get("/scan/{scan_id}")
-async def get_scan_status(scan_id: str):
+async def get_scan_status(scan_id: str, user = Depends(get_current_user)):
     """Get real-time status, logs, and vulnerabilities for a scan."""
     if scan_id not in scans_db:
         raise HTTPException(status_code=404, detail="Scan not found")
+
+    # Check ownership
+    scan_data = scans_db[scan_id]
+    if scan_data.get("user_id") != user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this scan")
         
     # Get real-time status from Redis
     db_logger = DatabaseLogger(scan_id)
@@ -395,10 +439,17 @@ async def verify_target(target_id: str):
     return result
 
 @app.post("/targets/create")
-async def create_target(target: ScanTarget, user_id: str = "mock-user-123"):
+async def create_target(target: ScanTarget, user = Depends(get_current_user)):
     """
     Create a new target with auto-generated verification token.
     """
+    # Validate for SSRF
+    if not is_safe_target(target.value):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid target. Private IPs, local networks, and reserved domains are not allowed."
+        )
+
     target_id = str(uuid.uuid4())
     verification_token = f"vaptiq-verify={str(uuid.uuid4())[:16]}"
     
@@ -406,7 +457,7 @@ async def create_target(target: ScanTarget, user_id: str = "mock-user-123"):
         "id": target_id,
         "type": target.type,
         "value": target.value,
-        "user_id": user_id,
+        "user_id": user.id,
         "verification_token": verification_token,
         "is_verified": False,
         "verified_at": None,

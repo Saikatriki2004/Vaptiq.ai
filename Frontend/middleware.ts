@@ -2,10 +2,15 @@ import { createServerClient, type CookieOptions } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
 
 export async function middleware(request: NextRequest) {
-    // Temporarily bypass Supabase auth if credentials are not configured
+    // Security Fix: Fail closed if Supabase auth is not configured
     if (!process.env.NEXT_PUBLIC_SUPABASE_URL ||
         process.env.NEXT_PUBLIC_SUPABASE_URL === 'your-project-url') {
-        return NextResponse.next();
+        console.error("CRITICAL: Supabase URL is not configured. Blocking access.");
+        // Return 500 or redirect to error page
+        return new NextResponse(
+            JSON.stringify({ error: "Configuration Error", message: "Authentication service not configured." }),
+            { status: 500, headers: { 'content-type': 'application/json' } }
+        );
     }
 
     let response = NextResponse.next({
