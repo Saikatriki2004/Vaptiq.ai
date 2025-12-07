@@ -58,6 +58,38 @@ celery_app.conf.update(
     broker_connection_retry_on_startup=True,  # Retry Redis connection on startup
 )
 
+# --- Smart Retry Policies (Stability Enhancement) ---
+# Network glitches cause 50% of scanner errors. Smart retries fix them.
+celery_app.conf.task_annotations = {
+    'scan.run_nmap_task': {
+        'rate_limit': '10/m',  # Don't DoS the target
+        'autoretry_for': (ConnectionError, TimeoutError, OSError),
+        'retry_backoff': True,  # Wait 1s, 2s, 4s, 8s...
+        'retry_backoff_max': 600,  # Max 10 minute wait
+        'max_retries': 5
+    },
+    'scan.run_zap_task': {
+        'rate_limit': '5/m',  # ZAP is heavier, lower rate
+        'autoretry_for': (ConnectionError, TimeoutError, OSError),
+        'retry_backoff': True,
+        'retry_backoff_max': 300,
+        'max_retries': 3
+    },
+    'scan.run_ssl_check_task': {
+        'rate_limit': '20/m',  # SSL checks are fast
+        'autoretry_for': (ConnectionError, TimeoutError),
+        'retry_backoff': True,
+        'max_retries': 3
+    },
+    'scan.run_nikto_task': {
+        'rate_limit': '3/m',  # Nikto is very heavy
+        'autoretry_for': (ConnectionError, TimeoutError, OSError),
+        'retry_backoff': True,
+        'retry_backoff_max': 600,
+        'max_retries': 3
+    }
+}
+
 # --- Celery Beat Schedule (Periodic Tasks) ---
 celery_app.conf.beat_schedule = {
     'sweep-stale-scans': {

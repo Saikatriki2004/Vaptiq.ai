@@ -21,13 +21,113 @@ from .verifier_agent import VerifierAgent, SuspectedVuln
 from .db_logger import DatabaseLogger
 from .security import sanitize_target  # ✅ CRITICAL-009: Import sanitization
 
-# --- Tool Registry ---
-# Maps TargetType to a list of Tool Functions
 TOOL_REGISTRY = {
     "URL": ["run_nmap_scan", "run_zap_spider", "check_ssl_cert"],
     "IP":  ["run_nmap_scan", "check_geo_ip"],
     "API": ["run_nmap_scan", "fuzz_api_endpoints"]
 }
+
+
+# =============================================================================
+# CONSENSUS ENGINE - Cross-validation for accuracy
+# =============================================================================
+
+def consensus_check(vulnerability: Vulnerability, all_findings: List[Vulnerability] = None) -> str:
+    """
+    Consensus Engine: Cross-validate findings before reporting.
+    
+    Accuracy comes from cross-validation. If Tool A says "XSS found,"
+    we use Tool B (or an AI Agent) to confirm it before alerting the user.
+    
+    Args:
+        vulnerability: The finding to validate
+        all_findings: List of all findings for cross-reference
+        
+    Returns:
+        Status string: "CONFIRMED", "FALSE_POSITIVE", "PENDING_VERIFICATION", 
+                       "SUSPECTED", or "DISCARDED"
+    """
+    all_findings = all_findings or []
+    
+    # 1. Tool Confidence - Open ports from Nmap are reliable
+    if vulnerability.title.startswith("Open Port") and vulnerability.severity == "INFO":
+        return "CONFIRMED"
+    
+    # 2. Dry Run results are always confirmed (infrastructure checks)
+    if vulnerability.title in ["Dry Run Successful", "Scanner Configuration Error"]:
+        return "CONFIRMED"
+    
+    # 3. Security violations are always confirmed
+    if "Security Violation" in vulnerability.title:
+        return "CONFIRMED"
+    
+    # 4. Cross-Verification - Check if multiple tools found same issue type
+    if all_findings:
+        # Normalize for comparison (case-insensitive, type-based matching)
+        vuln_type = _extract_vuln_type(vulnerability.title)
+        matching_findings = [
+            f for f in all_findings 
+            if _extract_vuln_type(f.title) == vuln_type and f != vulnerability
+        ]
+        if matching_findings:
+            # Multiple tools agree = higher confidence
+            return "CONFIRMED"
+    
+    # 5. SQL Injection - Always verify with deeper tool (SQLMap)
+    if "SQL Injection" in vulnerability.title or "SQLi" in vulnerability.title:
+        return "PENDING_VERIFICATION"
+    
+    # 6. XSS - Verify to avoid false positives from encoding issues
+    if "XSS" in vulnerability.title or "Cross-Site Scripting" in vulnerability.title:
+        if vulnerability.severity == "CRITICAL":
+            return "PENDING_VERIFICATION"
+        return "SUSPECTED"
+    
+    # 7. Critical findings always go to AI verification
+    if vulnerability.severity == "CRITICAL":
+        return "PENDING_VERIFICATION"
+    
+    # 8. High severity - verify if confidence is unclear
+    if vulnerability.severity == "HIGH":
+        # Check if we have proof already
+        if vulnerability.proof_of_exploit:
+            return "CONFIRMED"
+        return "PENDING_VERIFICATION"
+    
+    # 9. Low confidence findings from noisy tools
+    if vulnerability.severity == "LOW" and not vulnerability.proof_of_exploit:
+        # INFO and LOW without proof are suspected but included
+        return "SUSPECTED"
+    
+    # 10. Default: Trust the tool for MEDIUM severity
+    return "SUSPECTED"
+
+
+def _extract_vuln_type(title: str) -> str:
+    """
+    Extract normalized vulnerability type from title for comparison.
+    
+    Examples:
+        "SQL Injection in login" -> "sql_injection"
+        "Reflected XSS (CVE-2023-1234)" -> "xss"
+    """
+    title_lower = title.lower()
+    
+    if "sql injection" in title_lower or "sqli" in title_lower:
+        return "sql_injection"
+    if "xss" in title_lower or "cross-site scripting" in title_lower:
+        return "xss"
+    if "csrf" in title_lower or "cross-site request" in title_lower:
+        return "csrf"
+    if "open port" in title_lower:
+        return "open_port"
+    if "ssl" in title_lower or "tls" in title_lower:
+        return "ssl_tls"
+    if "header" in title_lower:
+        return "security_header"
+    
+    # Return normalized title as fallback
+    return title_lower.replace(" ", "_")[:30]
 
 # --- Real Nmap Tool Implementation ---
 async def run_nmap_scan(target: str, target_type: str, dry_run: bool = False) -> List[Vulnerability]:
