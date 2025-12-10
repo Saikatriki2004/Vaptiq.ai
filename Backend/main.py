@@ -365,7 +365,7 @@ async def export_scan(
                 headers={"Content-Disposition": f"attachment; filename=vaptiq_report_{scan_id}.json"}
             )
     except Exception as e:
-        logger.exception(f"Report generation failed for scan {scan_id}")
+        logger.exception(f"Report generation failed for scan {safe_scan_id}")
         raise HTTPException(status_code=500, detail="Failed to generate report")
 
 
@@ -653,7 +653,7 @@ async def get_scan_status(
         try:
             vulnerabilities = json.loads(vuln_json_str)
         except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse vulnerabilities JSON for scan {scan_id}: {e}")
+            logger.warning(f"Failed to parse vulnerabilities JSON for scan {safe_scan_id}: {e}")
             vulnerabilities = []
 
     return {

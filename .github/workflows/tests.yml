@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [ main, develop ]
 
+# Default permissions - least privilege
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   #==========================================================================
   # Backend Unit Tests
