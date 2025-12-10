@@ -62,7 +62,8 @@ dnspython==2.4.2  # For DNS verification
 # Development & Testing (Optional)
 # ============================================================================
 pytest==7.4.3
-pytest-asyncio==0.21.1
+pytest-asyncio==0.23.3
 pytest-cov==4.1.0
+httpx>=0.25.0  # Required for FastAPI TestClient
 safety==2.3.5  # Dependency vulnerability scanner
 bandit==1.7.5  # Python security linter

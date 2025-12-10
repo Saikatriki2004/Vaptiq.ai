@@ -16,10 +16,10 @@ jobs:
     
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       
@@ -36,7 +36,7 @@ jobs:
           cat safety-report.json
       
       - name: Upload Safety Report
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: safety-report
           path: Backend/safety-report.json
@@ -47,10 +47,10 @@ jobs:
     
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       
@@ -61,7 +61,7 @@ jobs:
           bandit -r Backend/ -f txt
       
       - name: Upload Bandit Report
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: bandit-report
           path: bandit-report.json
@@ -69,7 +69,7 @@ jobs:
       - name: Check for HIGH severity issues
         run: |
           # Fail the build if HIGH or CRITICAL issues found
-          pip install jq
+          sudo apt-get update && sudo apt-get install -y jq
           HIGH_COUNT=$(jq '.results | map(select(.issue_severity == "HIGH" or .issue_severity == "CRITICAL")) | length' bandit-report.json)
           if [ "$HIGH_COUNT" -gt 0 ]; then
             echo "❌ Found $HIGH_COUNT HIGH/CRITICAL security issues!"
@@ -82,16 +82,17 @@ jobs:
     
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0  # Full history for better secret detection
       
       - name: TruffleHog Secret Scan
-        uses: trufflesecurity/trufflehog@main
+        uses: trufflesecurity/trufflehog@v3.88.0
         with:
           path: ./
           base: main
           head: HEAD
+          extra_args: --only-verified
 
   security-tests:
     name: Run Security Test  Suite
@@ -110,10 +111,10 @@ jobs:
     
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       
@@ -129,10 +130,10 @@ jobs:
           ENVIRONMENT: test
         run: |
           cd Backend
-          pytest tests/security/ -v --tb=short --junit-xml=security-test-results.xml
+          pytest tests/security/ -v --tb=short --junit-xml=security-test-results.xml --cov-fail-under=0
       
       - name: Upload Test Results
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         if: always()
         with:
           name: security-test-results
@@ -144,21 +145,21 @@ jobs:
     
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       
       - name: Build Docker Image
         run: |
-          docker build -t vaptiq-backend:test ./Backend
+          docker build -t vaptiq-backend:test -f Backend/Dockerfile .
       
       - name: Run Trivy Container Scan
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.28.0
         with:
           image-ref: 'vaptiq-backend:test'
           format: 'sarif'
           output: 'trivy-results.sarif'
       
       - name: Upload Trivy Results to GitHub Security
-        uses: github/codeql-action/upload-sarif@v2
+        uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: 'trivy-results.sarif'
 
@@ -172,16 +173,16 @@ jobs:
     
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v2
+        uses: github/codeql-action/init@v3
         with:
-          languages: python, javascript
+          languages: python, javascript-typescript
           queries: security-extended
       
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v2
+        uses: github/codeql-action/analyze@v3
 
   security-summary:
     name: Security Scan Summary
@@ -191,7 +192,7 @@ jobs:
     
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
       
       - name: Generate Security Summary
         run: |

@@ -23,6 +23,7 @@ def client():
     return TestClient(app)
 
 
+@pytest.mark.security
 class TestAuthentication:
     """Test JWT authentication security"""
     
@@ -54,6 +55,7 @@ class TestAuthentication:
         assert response.status_code == 401
 
 
+@pytest.mark.security
 class TestSSRFProtection:
     """Test SSRF protection in scanning functionality"""
     
@@ -80,6 +82,7 @@ class TestSSRFProtection:
             assert response.status_code in [200, 401]
 
 
+@pytest.mark.security
 class TestCommandInjection:
     """Test command injection prevention"""
     
@@ -102,6 +105,7 @@ class TestCommandInjection:
         assert response.status_code in [400, 401]
 
 
+@pytest.mark.security
 class TestIDORProtection:
     """Test Insecure Direct Object Reference protection"""
     
@@ -123,6 +127,7 @@ class TestIDORProtection:
         pass
 
 
+@pytest.mark.security
 class TestRateLimiting:
     """Test API rate limiting"""
     
@@ -142,6 +147,7 @@ class TestRateLimiting:
         assert 429 in status_codes, "Rate limiting should  trigger after 60 requests"
 
 
+@pytest.mark.security
 class TestInputValidation:
     """Test UUID and input validation"""
     
@@ -161,6 +167,7 @@ class TestInputValidation:
         assert response.status_code == 400, "Invalid UUID should return 400 Bad Request"
 
 
+@pytest.mark.security
 class TestHTTPSEnforcement:
     """Test HTTPS enforcement in production"""
     
@@ -171,6 +178,7 @@ class TestHTTPSEnforcement:
         pass
 
 
+@pytest.mark.security
 class TestSecurityHeaders:
     """Test security headers presence"""
     
