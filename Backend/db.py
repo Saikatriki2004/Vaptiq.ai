@@ -10,6 +10,10 @@ from prisma import Prisma
 import os
 import logging
 
+# Global Database Client
+db = Prisma()
+
+async def connect_db():
 logger = logging.getLogger(__name__)
 
 # Global database client instance (singleton pattern)
@@ -34,14 +38,18 @@ async def connect_db():
             # Enforce SSL in production
             if "sslmode=require" not in database_url and "sslmode=verify" not in database_url:
                 raise ValueError(
-                    "❌ SECURITY ERROR: Database SSL required in production!\\n"
+                    " SECURITY ERROR: Database SSL required in production!\\n"
                     "DATABASE_URL must include 'sslmode=require' or 'sslmode=verify-full'\\n"
                     "Example: postgresql://user:pass@host:5432/db?sslmode=require"
                 )
-            logger.info("✅ Database SSL validation passed (production mode)")
+            logger.info(" Database SSL validation passed (production mode)")
         
         await db.connect()
-        logger.info("✅ Database connected successfully")
+
+async def disconnect_db():
+    if db.is_connected():
+        await db.disconnect()
+        logger.info(" Database connected successfully")
 
 
 async def disconnect_db():
@@ -51,4 +59,4 @@ async def disconnect_db():
     """
     if db.is_connected():
         await db.disconnect()
-        logger.info("📤 Database disconnected")
+        logger.info(" Database disconnected")

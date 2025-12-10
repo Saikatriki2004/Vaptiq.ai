@@ -16,6 +16,9 @@ from typing import List, Optional
 import xmltodict
 
 # Import centralized models
+from models import ScanTarget, Vulnerability, ScanResult
+from verifier_agent import VerifierAgent, SuspectedVuln
+from db_logger import DatabaseLogger
 from .models import ScanTarget, Vulnerability, ScanResult
 from .verifier_agent import VerifierAgent, SuspectedVuln
 from .db_logger import DatabaseLogger
@@ -132,6 +135,18 @@ def _extract_vuln_type(title: str) -> str:
 # --- Real Nmap Tool Implementation ---
 async def run_nmap_scan(target: str, target_type: str, dry_run: bool = False) -> List[Vulnerability]:
     """
+    EXECUTING REAL NMAP BINARY
+    """
+    print(f"🚀 Executing Nmap on {target}...")
+    
+    # Check if nmap is installed (It is in our Dockerfile)
+    nmap_path = shutil.which("nmap")
+    if not nmap_path:
+        return [Vulnerability(title="Config Error", severity="LOW", description="Nmap not installed", remediation="Install Nmap")]
+
+    # Safe Subprocess Execution
+    # -sV: Version Detection, -T4: Fast, --top-ports 100: Quick Scan
+    cmd = [nmap_path, "-sV", "-T4", "--top-ports", "100", "-oX", "-", target]
     Nmap Scanner Wrapper with SECURITY HARDENING.
     
     Security Features:
@@ -233,14 +248,23 @@ async def run_nmap_scan(target: str, target_type: str, dry_run: bool = False) ->
         stdout, stderr = await process.communicate()
         
         if process.returncode != 0:
+            print(f"Nmap Stderr: {stderr.decode()}")
             # Log stderr but do not crash
             print(f"Nmap Error: {stderr.decode()}")
             return []
 
-        # Parse XML Output
+        # Parse XML
         data = xmltodict.parse(stdout)
-        vulnerabilities = []
+        vulns = []
         
+        # Robust XML Traversal
+        nmap_run = data.get('nmaprun', {})
+        hosts = nmap_run.get('host', [])
+        if isinstance(hosts, dict): hosts = [hosts]
+        
+        for host in hosts:
+            ports = host.get('ports', {}).get('port', [])
+            if isinstance(ports, dict): ports = [ports]
         # Handle XML parsing logic
         nmap_run = data.get('nmaprun', {})
         hosts = nmap_run.get('host', [])
@@ -256,6 +280,14 @@ async def run_nmap_scan(target: str, target_type: str, dry_run: bool = False) ->
                 state = port.get('state', {}).get('@state')
                 if state == 'open':
                     service = port.get('service', {}).get('@name', 'unknown')
+                    product = port.get('service', {}).get('@product', '')
+                    port_id = port.get('@portid')
+                    
+                    vulns.append(Vulnerability(
+                        title=f"Open Port {port_id} ({service})",
+                        severity="INFO",
+                        description=f"Port {port_id} is open. Service: {service} {product}",
+                        remediation="Close if unnecessary."
                     version = port.get('service', {}).get('@product', '')
                     port_id = port.get('@portid')
                     
@@ -266,11 +298,11 @@ async def run_nmap_scan(target: str, target_type: str, dry_run: bool = False) ->
                         remediation="Close if unused.",
                         status="CONFIRMED"
                     ))
-                    
-        print(f"✅ Nmap scan complete. Found {len(vulnerabilities)} open ports.")
-        return vulnerabilities
+        return vulns
 
     except Exception as e:
+        print(f"❌ Nmap Crash: {e}")
+        return []
         return [Vulnerability(
             title="Scan Execution Error",
             severity="HIGH",
@@ -425,6 +457,11 @@ class SecurityAgent:
             # Run them all in parallel, but Semaphore limits active ones to 2
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
+            # Check for cancellations
+            for res in results:
+                if isinstance(res, asyncio.CancelledError):
+                    raise res
+
             self.logger.update_progress(60)
 
             # 3. Aggregation & Deduplication

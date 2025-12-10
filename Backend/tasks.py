@@ -13,6 +13,10 @@ import shutil
 from typing import List, Dict, Any
 from celery import chain, chord, group
 from celery.exceptions import SoftTimeLimitExceeded
+from celery_config import celery_app
+from agent import SecurityAgent
+from models import ScanTarget
+from db_logger import DatabaseLogger
 from .celery_config import celery_app
 from .agent import SecurityAgent, run_nmap_scan, run_zap_spider, check_ssl_cert, consensus_check
 from .models import ScanTarget, Vulnerability
@@ -54,7 +58,7 @@ async def _refund_user(user_id: str, amount: int, scan_id: str, reason: str):
         "reason": reason
     })
     
-    print(f"✅ Refunded {amount} credits to user {user_id[:8]}... (Reason: {reason})")
+    print(f" Refunded {amount} credits to user {user_id[:8]}... (Reason: {reason})")
 
 
 # =============================================================================

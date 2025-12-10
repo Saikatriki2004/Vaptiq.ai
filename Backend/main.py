@@ -149,17 +149,15 @@ async def verify_domain_ownership(target_value: str, token: Optional[str] = None
         }
 
 
-# --- Lifecycle Manager ---
+# --- Lifecycle: Connect to DB on Startup ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manages application startup and shutdown events"""
-    # Startup: Connect to database
+    print("🔌 Connecting to Database...")
     await connect_db()
     yield
-    # Shutdown: Disconnect from database
+    print("🔌 Disconnecting from Database...")
     await disconnect_db()
 
-# --- FastAPI App Initialization ---
 app = FastAPI(lifespan=lifespan)
 
 # ============================================================================
@@ -232,13 +230,6 @@ app.add_middleware(SecurityHeadersMiddleware)
 # --- Initialize Engines ---
 mitre_engine = MitreEngine()
 verifier_agent = VerifierAgent()
-
-# --- Mock Databases ---
-# TODO: Replace with Prisma queries once schema is defined
-# NOTE: scans_db will be replaced with db.scan queries
-# NOTE: mock_targets_db will be replaced with db.target queries
-scans_db = {}
-mock_targets_db = {}
 
 # --- Endpoints ---
 
@@ -478,6 +469,8 @@ async def start_scan(
     
     # 4. Check if target requires verification (URL type)
     if target.type == "URL":
+        if not target_id:
+             raise HTTPException(
         if not target_id or target_id not in mock_targets_db:
             # REFUND if verification fails
             await db.user.update(
@@ -486,9 +479,15 @@ async def start_scan(
             )
             raise HTTPException(
                 status_code=400,
-                detail="URL targets must be created and verified before scanning. Please create a target first."
+                detail="URL targets must be created and verified before scanning."
             )
         
+        # Verify target exists in DB and is verified
+        db_target = await db.target.find_unique(where={"id": target_id})
+        if not db_target:
+             raise HTTPException(status_code=404, detail="Target not found")
+
+        if not db_target.isVerified:
         target_data = mock_targets_db[target_id]
         if not target_data["is_verified"]:
             # REFUND if verification fails
@@ -501,6 +500,22 @@ async def start_scan(
                 detail=f"Domain verification required. Please verify ownership of {target.value} before scanning."
             )
     
+    # 1. Create Scan in Postgres (Replaces scans_db)
+    # We assume target_id exists in DB for authenticated scans
+    scan_data = {
+        "status": "QUEUED",
+        "targetId": target_id if target_id else None
+    }
+    
+    scan = await db.scan.create(data=scan_data)
+
+    # Pydantic v2 compatibility
+    target_dict = target.model_dump(mode='json') if hasattr(target, 'model_dump') else target.dict()
+
+    # 2. Dispatch to Redis/Celery
+    task = run_background_scan.delay(target_dict, scan.id)
+    
+    return {"scan_id": scan.id, "status": "QUEUED", "task_id": task.id}
     # 5. Create Scan Record in Database
     scan_id = str(uuid.uuid4())
     target_data = target.model_dump(mode='json') if hasattr(target, 'model_dump') else target.dict()
@@ -527,7 +542,7 @@ async def start_scan(
     # 7. Dispatch to Celery Worker
     task = run_background_scan.delay(target_data, scan_id, user.id)  # Pass user_id for refunds
     
-    logger.info(f"✅ Scan {scan_id} queued for user {user.email}. Credits: {updated_user.credits} (-{cost})")
+    logger.info(f" Scan {scan_id} queued for user {user.email}. Credits: {updated_user.credits} (-{cost})")
     
     return {
         "scan_id": scan_id,
@@ -540,10 +555,23 @@ async def start_scan(
 
 @app.get("/scans")
 async def list_scans(
-    user = Depends(get_current_user),  # ✅ CRITICAL-002: Authentication required
+    user = Depends(get_current_user),  #  CRITICAL-002: Authentication required
     limit: int = 50
 ):
     """
+    List all scans sorted by creation date (newest first).
+    """
+    scans = await db.scan.find_many(
+        order={"createdAt": "desc"},
+        include={"target": True, "vulnerabilities": True},
+        take=50
+    )
+    
+    scan_list = []
+    for scan in scans:
+        # Get real-time status from Redis if running
+        db_logger = DatabaseLogger(scan.id)
+        redis_status_raw = db_logger.redis_client.get(f"scan:{scan.id}:status")
     List scans for the authenticated user.
     
     Security:
@@ -551,7 +579,7 @@ async def list_scans(
     - Returns only user's own scans (data isolation)
     - Admins can see all scans
     """
-    # ✅ Filter scans by ownership
+    #  Filter scans by ownership
     if user.role == "ADMIN":
         # Admins see all scans
         user_scans = list(scans_db.values())[:limit]
@@ -571,38 +599,30 @@ async def list_scans(
         redis_status_raw = db_logger.redis_client.get(f"scan:{scan_id}:status")
         redis_status = safe_decode(redis_status_raw)
         
-        # Calculate severity summary
-        summary = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
-        vuln_json_raw = db_logger.redis_client.get(f"scan:{scan_id}:vulnerabilities")
+        final_status = redis_status if redis_status else scan.status
         
-        if vuln_json_raw:
-            vuln_json_str = safe_decode(vuln_json_raw)
-            try:
-                vulnerabilities = json.loads(vuln_json_str)
-                for v in vulnerabilities:
-                    sev = v.get("severity", "LOW").upper()
-                    if sev in summary:
-                        summary[sev] += 1
-            except json.JSONDecodeError as e:
-                logger.warning(f"Failed to parse vulnerabilities JSON for scan {scan_id}: {e}")
+        # Calculate severity summary from DB vulnerabilities
+        summary = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+        if scan.vulnerabilities:
+            for v in scan.vulnerabilities:
+                sev = v.severity.upper()
+                if sev in summary:
+                    summary[sev] += 1
 
-        # Build enriched scan object
         scan_list.append({
-            "scan_id": scan_id,
-            "status": redis_status or scan_data["status"],
-            "target": scan_data["target"],
-            "created_at": scan_data["created_at"],
+            "scan_id": scan.id,
+            "status": final_status,
+            "target": scan.target,
+            "created_at": scan.createdAt,
             "summary": summary
         })
 
-    # Sort by created_at desc
-    scan_list.sort(key=lambda x: x["created_at"], reverse=True)
     return scan_list
 
 @app.get("/scan/{scan_id}")
 async def get_scan_status(
     scan_id: str,
-    user = Depends(get_current_user),  # ✅ CRITICAL-002: Authentication required
+    user = Depends(get_current_user),  #  CRITICAL-002: Authentication required
     request: Request = None
 ):
     """
@@ -613,7 +633,7 @@ async def get_scan_status(
     - Validates UUID format
     - Enforces ownership check (IDOR protection)
     """
-    # ✅ Validate UUID
+    #  Validate UUID
     try:
         safe_scan_id = validate_uuid(scan_id, "scan_id")
     except ValueError as e:
@@ -625,7 +645,7 @@ async def get_scan_status(
     
     scan = scans_db[safe_scan_id]
     
-    # ✅ IDOR Protection: Verify ownership
+    #  IDOR Protection: Verify ownership
     if scan.get("user_id") != user.id and user.role != "ADMIN":
         ip_address = request.client.host if request else None
         audit_logger.log_access_denied(
@@ -685,7 +705,7 @@ async def verify_target(target_id: str):
 @app.post("/targets/create")
 async def create_target(
     target: ScanTarget,
-    user = Depends(get_current_user)  # ✅ CRITICAL-002 & HIGH-003: Authentication required
+    user = Depends(get_current_user)  #  CRITICAL-002 & HIGH-003: Authentication required
 ):
     """
     Create a new target for scanning.
@@ -697,12 +717,12 @@ async def create_target(
     target_id = str(uuid.uuid4())
     verification_token = f"vaptiq-verify={str(uuid.uuid4())[:16]}"
     
-    #  ✅ HIGH-003: Use authenticated user ID (not hardcoded)
+    #   HIGH-003: Use authenticated user ID (not hardcoded)
     mock_targets_db[target_id] = {
         "id": target_id,
         "type": target.type,
         "value": target.value,
-        "user_id": user.id,  # ✅ Use real user ID from JWT
+        "user_id": user.id,  #  Use real user ID from JWT
         "verification_token": verification_token,
         "is_verified": False,
         "verified_at": None,
@@ -719,7 +739,7 @@ async def create_target(
 @app.get("/targets/{target_id}")
 async def get_target(
     target_id: str,
-    user = Depends(get_current_user)  # ✅ CRITICAL-002: Authentication required
+    user = Depends(get_current_user)  #  CRITICAL-002: Authentication required
 ):
     """
     Get target details.
@@ -729,7 +749,7 @@ async def get_target(
     - Validates UUID format
     - Enforces ownership check
     """
-    # ✅ Validate UUID
+    #  Validate UUID
     try:
         safe_target_id = validate_uuid(target_id, "target_id")
     except ValueError as e:
@@ -740,18 +760,18 @@ async def get_target(
     
     target = mock_targets_db[safe_target_id]
     
-    # ✅ IDOR Protection
+    #  IDOR Protection
     if target.get("user_id") != user.id and user.role != "ADMIN":
         raise HTTPException(status_code=403, detail="Access denied")
     
     return target
 
 @app.post("/verify-vulnerability")
-@limiter.limit("10/minute")  # ✅ Rate limit: 10 verifications per minute (AI resource-intensive)
+@limiter.limit("10/minute")  #  Rate limit: 10 verifications per minute (AI resource-intensive)
 async def verify_vulnerability_endpoint(
     request: Request,
     suspected_vuln: SuspectedVuln,
-    user = Depends(get_current_user)  # ✅ CRITICAL-002: Authentication required
+    user = Depends(get_current_user)  #  CRITICAL-002: Authentication required
 ):
     """
     Manually verify a suspected vulnerability using AI agent.
