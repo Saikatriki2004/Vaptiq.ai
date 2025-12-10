@@ -14,6 +14,7 @@ import pytest
 import os
 from unittest.mock import Mock, AsyncMock, patch, MagicMock
 import sys
+from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
@@ -71,7 +72,7 @@ class TestLLMProviderInitialization:
             assert agent.model == "gemini-2.0-flash-exp"
             
             call_kwargs = mock_openai.call_args[1]
-            assert "generativelanguage.googleapis.com" in call_kwargs["base_url"]
+            assert urlparse(call_kwargs["base_url"]).hostname == "generativelanguage.googleapis.com"
     
     def test_kimi_initialization(self, monkeypatch):
         """Test Kimi (Moonshot) provider initialization."""
