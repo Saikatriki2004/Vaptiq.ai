@@ -17,7 +17,7 @@ export function ScanProgress() {
                         <span className="text-white">Phase 3/5: Verifying SQL Injection Vectors</span>
                         <span className="text-emerald-500 font-mono">60%</span>
                     </div>
-                    <Progress value={60} className="h-2 bg-zinc-800" indicatorClassName="bg-emerald-500" />
+                    <Progress value={60} className="h-2 bg-zinc-800 [&>div]:bg-emerald-500" />
                     <div className="grid grid-cols-3 gap-2 pt-2">
                         <div className="text-xs text-zinc-500">
                             <span className="block text-zinc-400 mb-1">Target</span>

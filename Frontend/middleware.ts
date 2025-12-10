@@ -2,10 +2,27 @@ import { createServerClient, type CookieOptions } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
 
 export async function middleware(request: NextRequest) {
-    // Temporarily bypass Supabase auth if credentials are not configured
-    if (!process.env.NEXT_PUBLIC_SUPABASE_URL ||
-        process.env.NEXT_PUBLIC_SUPABASE_URL === 'your-project-url') {
-        return NextResponse.next();
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+    const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+
+    // ============================================================================
+    // ✅ CRITICAL SECURITY FIX: Fail-Closed Logic (was fail-open)
+    // ============================================================================
+    // If Supabase config is missing, DENY access instead of allowing
+    if (!supabaseUrl || !supabaseAnonKey || supabaseUrl === 'your-project-url') {
+        console.error('❌ SECURITY ERROR: Supabase configuration missing!')
+
+        // Redirect to configuration error page (fail-closed)
+        const url = request.nextUrl.clone()
+        url.pathname = '/auth/config-error'
+
+        // Prevent redirect loop
+        if (request.nextUrl.pathname !== '/auth/config-error') {
+            return NextResponse.redirect(url)
+        }
+
+        // If already on error page, just show it
+        return NextResponse.next()
     }
 
     let response = NextResponse.next({
@@ -15,8 +32,8 @@ export async function middleware(request: NextRequest) {
     })
 
     const supabase = createServerClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!,
-        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+        supabaseUrl,
+        supabaseAnonKey,
         {
             cookies: {
                 get(name: string) {
@@ -64,10 +81,12 @@ export async function middleware(request: NextRequest) {
         data: { user },
     } = await supabase.auth.getUser()
 
+    // Redirect  unauthenticated users trying to access dashboard
     if (!user && request.nextUrl.pathname.startsWith('/dashboard')) {
         return NextResponse.redirect(new URL('/login', request.url))
     }
 
+    // Redirect authenticated users trying to access login
     if (user && request.nextUrl.pathname.startsWith('/login')) {
         return NextResponse.redirect(new URL('/dashboard', request.url))
     }

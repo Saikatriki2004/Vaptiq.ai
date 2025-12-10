@@ -1,7 +1,11 @@
 # --- Imports ---
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 from typing import Optional
 from datetime import datetime
 from contextlib import asynccontextmanager
@@ -19,6 +23,8 @@ from tasks import run_background_scan
 from agent import ScanTarget
 from db_logger import DatabaseLogger
 from db import db, connect_db, disconnect_db
+from auth import get_current_user  # JWT authentication
+from security import validate_uuid, audit_logger  # ✅ Security utilities
 
 # --- Logging Configuration ---
 logging.basicConfig(
@@ -36,11 +42,111 @@ def safe_decode(value):
     return value
 
 
+import dns.resolver
+import dns.exception
+
 async def verify_domain_ownership(target_value: str, token: Optional[str] = None):
-    """Verify domain ownership via DNS TXT record.
-    TODO: Implement real DNS TXT check using dnspython"""
+    """
+    Verify domain ownership via DNS TXT record.
+    
+    Security:
+    - Prevents unauthorized scanning of domains
+    - Uses cryptographic token verification
+    - Real DNS lookup (not mock)
+    
+    Process:
+    1. User creates target, receives verification token
+    2. User adds TXT record: vaptiq-verify=<token> to their domain
+    3. This function queries DNS to verify the token exists
+    
+    Args:
+        target_value: Domain to verify (e.g., "example.com")
+        token: Expected verification token
+        
+    Returns:
+        dict with verified status and method
+    """
     logger.info(f"Verifying domain ownership for {target_value}")
-    return {"verified": True, "method": "mock", "target": target_value}
+    
+    if not token:
+        return {
+            "verified": False,
+            "method": "dns_txt",
+            "target": target_value,
+            "error": "No verification token provided"
+        }
+    
+    try:
+        # Extract domain from URL if needed
+        if "://" in target_value:
+            from urllib.parse import urlparse
+            parsed = urlparse(target_value)
+            domain = parsed.netloc
+        else:
+            domain = target_value
+        
+        # Query DNS TXT records
+        resolver = dns.resolver.Resolver()
+        resolver.timeout = 5
+        resolver.lifetime = 5
+        
+        txt_records = resolver.resolve(domain, 'TXT')
+        
+        # Check if our verification token exists
+        expected_record = f"vaptiq-verify={token}"
+        
+        for record in txt_records:
+            # TXT records are returned as quoted strings
+            record_value = record.to_text().strip('"')
+            
+            if record_value == expected_record:
+                logger.info(f"✅ Domain {domain} verified successfully")
+                return {
+                    "verified": True,
+                    "method": "dns_txt",
+                    "target": target_value,
+                    "record": record_value
+                }
+        
+        # Token not found in TXT records
+        logger.warning(f"⚠️ Verification token not found for {domain}")
+        return {
+            "verified": False,
+            "method": "dns_txt",
+            "target": target_value,
+            "error": "Verification token not found in DNS TXT records",
+            "hint": f"Add TXT record: {expected_record}"
+        }
+        
+    except dns.resolver.NXDOMAIN:
+        return {
+            "verified": False,
+            "method": "dns_txt",
+            "target": target_value,
+            "error": "Domain does not exist"
+        }
+    except dns.resolver.NoAnswer:
+        return {
+            "verified": False,
+            "method": "dns_txt",
+            "target": target_value,
+            "error": "No TXT records found for this domain"
+        }
+    except dns.exception.Timeout:
+        return {
+            "verified": False,
+            "method": "dns_txt",
+            "target": target_value,
+            "error": "DNS query timeout"
+        }
+    except Exception as e:
+        logger.error(f"DNS verification error for {domain}: {str(e)}")
+        return {
+            "verified": False,
+            "method": "dns_txt",
+            "target": target_value,
+            "error": f"Verification failed: {type(e).__name__}"
+        }
 
 
 # --- Lifecycle: Connect to DB on Startup ---
@@ -54,10 +160,40 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# --- CORS Configuration ---
-# Load allowed origins from environment with fallback to localhost
+# ============================================================================
+# SECURITY: Rate Limiting (MEDIUM-014)
+# ============================================================================
+
+# Initialize rate limiter
+# Uses IP address for rate limiting by default
+limiter = Limiter(
+    key_func=get_remote_address,
+    default_limits=[os.getenv("RATE_LIMIT_DEFAULT", "60/minute")]
+)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+logger.info(f"✅ Rate limiting enabled: {os.getenv('RATE_LIMIT_DEFAULT', '60/minute')}")
+
+# ============================================================================
+# SECURITY: HTTPS Enforcement & CORS Configuration (HIGH-005)
+# ============================================================================
+
+# Get environment setting
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:3001")
 allowed_origins_list = [origin.strip() for origin in ALLOWED_ORIGINS.split(",")]
+
+# ✅ HTTPS Enforcement in Production
+if ENVIRONMENT == "production":
+    for origin in allowed_origins_list:
+        if origin.startswith("http://") and "localhost" not in origin:
+            raise ValueError(
+                f"❌ SECURITY ERROR: HTTPS required in production!\n"
+                f"Invalid origin: {origin}\n"
+                f"All production origins must use HTTPS (https://)."
+            )
+    logger.info("✅ HTTPS enforcement validated for production")
 
 app.add_middleware(
     CORSMiddleware,
@@ -67,6 +203,30 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization"],
 )
 
+# ============================================================================
+# SECURITY: Security Headers Middleware (MEDIUM-017)
+# ============================================================================
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add security headers to all responses"""
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        
+        # Security headers
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        response.headers["Content-Security-Policy"] = "default-src 'self'"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        
+        # Remove server identification
+        response.headers.pop("Server", None)
+        
+        return response
+
+app.add_middleware(SecurityHeadersMiddleware)
+
 # --- Initialize Engines ---
 mitre_engine = MitreEngine()
 verifier_agent = VerifierAgent()
@@ -74,8 +234,28 @@ verifier_agent = VerifierAgent()
 # --- Endpoints ---
 
 @app.get("/scan/{scan_id}/export")
-async def export_scan(scan_id: str, format: str = "pdf", severities: Optional[str] = None):
-    """Export scan report in PDF, HTML, or JSON format."""
+async def export_scan(
+    scan_id: str,
+    format: str = "pdf",
+    severities: Optional[str] = None,
+    user = Depends(get_current_user),  # ✅ CRITICAL-002: Authentication required
+    request: Request = None
+):
+    """
+    Export scan report in PDF, HTML, or JSON format.
+    
+    Security:
+    - Requires authentication
+    - Validates UUID format
+    - Enforces ownership check (IDOR protection)
+    - Logs sensitive data access
+    """
+    # ✅ Validate UUID to prevent injection
+    try:
+        safe_scan_id = validate_uuid(scan_id, "scan_id")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
     # Validate format parameter
     allowed_formats = {"pdf", "html", "json"}
     if format not in allowed_formats:
@@ -83,6 +263,32 @@ async def export_scan(scan_id: str, format: str = "pdf", severities: Optional[st
             status_code=400,
             detail=f"Invalid format '{format}'. Allowed: {', '.join(allowed_formats)}"
         )
+    
+    # ✅ Check if scan exists
+    if safe_scan_id not in scans_db:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    
+    scan = scans_db[safe_scan_id]
+    
+    # ✅ IDOR Protection: Verify ownership
+    if scan.get("user_id") != user.id and user.role != "ADMIN":
+        ip_address = request.client.host if request else None
+        audit_logger.log_access_denied(
+            user_id=user.id,
+            resource=f"/scan/{scan_id}/export",
+            reason="User does not own this scan",
+            ip_address=ip_address
+        )
+        raise HTTPException(status_code=403, detail="Access denied: Not your scan")
+    
+    # ✅ Log sensitive data access
+    ip_address = request.client.host if request else None
+    audit_logger.log_sensitive_access(
+        user_id=user.id,
+        resource=f"/scan/{scan_id}/export",
+        action=f"EXPORT_{format.upper()}",
+        ip_address=ip_address
+    )
     
     # Fetch scan result from Redis via DatabaseLogger helper or direct redis
     # For MVP, we'll try to reconstruct from what we have or use mock if missing
@@ -155,7 +361,39 @@ async def export_scan(scan_id: str, format: str = "pdf", severities: Optional[st
 
 
 @app.post("/scan/{scan_id}/simulate-attack")
-async def simulate_attack(scan_id: str):
+@limiter.limit("5/minute")  # ✅ Rate limit: 5 simulations per minute (resource-intensive)
+async def simulate_attack(
+    request: Request,
+    scan_id: str,
+    user = Depends(get_current_user),  # ✅ CRITICAL-002: Authentication required
+    request_obj: Request = None
+):
+    """
+    Simulate attack path based on scan findings.
+    
+    Security:
+    - Requires authentication
+    - Validates UUID format
+    - Enforces ownership check
+    """
+    # ✅ Validate UUID
+    try:
+        safe_scan_id = validate_uuid(scan_id, "scan_id")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
+    # ✅ Check ownership
+    if safe_scan_id in scans_db:
+        scan = scans_db[safe_scan_id]
+        if scan.get("user_id") != user.id and user.role != "ADMIN":
+            ip_address = request.client.host if request else None
+            audit_logger.log_access_denied(
+                user_id=user.id,
+                resource=f"/scan/{scan_id}/simulate-attack",
+                reason="User does not own this scan",
+                ip_address=ip_address
+            )
+            raise HTTPException(status_code=403, detail="Access denied")
     # Fetch findings from Redis/DB
     # For demo, using mock
     findings = [
@@ -172,15 +410,74 @@ async def simulate_attack(scan_id: str):
 
 
 @app.post("/scan")
-async def start_scan(target: ScanTarget, target_id: Optional[str] = None):
+@limiter.limit("10/minute")  # ✅ Rate limit: 10 scans per minute
+async def start_scan(
+    request: Request,
+    target: ScanTarget,
+    user = Depends(get_current_user),  # JWT-validated user (SECURITY FIX)
+    target_id: Optional[str] = None
+):
     """
     Start a vulnerability scan on a target.
-    Dispatches job to Celery worker.
+    
+    Security Features:
+    - JWT authentication prevents user_id forgery
+    - Atomic credit deduction prevents race conditions
+    - Monthly budget caps prevent runaway costs
+    - Complete audit trail via CreditTransaction
+    
+    Cost Structure:
+    - Dry run: 0 credits (free connectivity test)
+    - Full scan: 10 credits
     """
-    # Check if target requires verification (URL type)
+    from auth import get_current_user
+    
+    # 1. Calculate Scan Cost
+    cost = 0 if target.dry_run else 10
+    
+    # 2. Check Monthly Budget Cap (Tier-based limits)
+    tier_limits = {
+        "FREE": {"monthly_cap": 50.0},
+        "PRO": {"monthly_cap": 500.0},
+        "ENTERPRISE": {"monthly_cap": 5000.0}  # Safety cap - never unlimited!
+    }
+    
+    user_tier_limit = tier_limits.get(user.tier, tier_limits["FREE"])
+    if user.monthlySpent >= user_tier_limit["monthly_cap"]:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Monthly budget cap reached ({user_tier_limit['monthly_cap']} credits). Contact support or upgrade tier."
+        )
+    
+    # 3. ATOMIC CREDIT DEDUCTION (CRITICAL - Prevents Race Condition)
+    # Only proceeds if credits >= cost. Returns None if condition fails.
+    updated_user = await db.user.update(
+        where={
+            "id": user.id,
+            "credits": {"gte": cost}  # Atomic condition check
+        },
+        data={
+            "credits": {"decrement": cost}
+        }
+    )
+    
+    if not updated_user:
+        raise HTTPException(
+            status_code=402,
+            detail=f"Insufficient credits. You have {user.credits} credits but need {cost}."
+        )
+    
+    # 4. Check if target requires verification (URL type)
     if target.type == "URL":
         if not target_id:
              raise HTTPException(
+        if not target_id or target_id not in mock_targets_db:
+            # REFUND if verification fails
+            await db.user.update(
+                where={"id": user.id},
+                data={"credits": {"increment": cost}}
+            )
+            raise HTTPException(
                 status_code=400,
                 detail="URL targets must be created and verified before scanning."
             )
@@ -191,6 +488,13 @@ async def start_scan(target: ScanTarget, target_id: Optional[str] = None):
              raise HTTPException(status_code=404, detail="Target not found")
 
         if not db_target.isVerified:
+        target_data = mock_targets_db[target_id]
+        if not target_data["is_verified"]:
+            # REFUND if verification fails
+            await db.user.update(
+                where={"id": user.id},
+                data={"credits": {"increment": cost}}
+            )
             raise HTTPException(
                 status_code=403,
                 detail=f"Domain verification required. Please verify ownership of {target.value} before scanning."
@@ -212,9 +516,48 @@ async def start_scan(target: ScanTarget, target_id: Optional[str] = None):
     task = run_background_scan.delay(target_dict, scan.id)
     
     return {"scan_id": scan.id, "status": "QUEUED", "task_id": task.id}
+    # 5. Create Scan Record in Database
+    scan_id = str(uuid.uuid4())
+    target_data = target.model_dump(mode='json') if hasattr(target, 'model_dump') else target.dict()
+    
+    # Store in mock DB (TODO: Replace with Prisma)
+    scans_db[scan_id] = {
+        "scan_id": scan_id,
+        "status": "QUEUED",
+        "target": target_data,
+        "target_id": target_id,
+        "user_id": user.id,
+        "created_at": datetime.now()
+    }
+    
+    # 6. Log Credit Transaction (Audit Trail)
+    await db.credittransaction.create(data={
+        "userId": user.id,
+        "amount": -cost,
+        "type": "SCAN_START",
+        "scanId": scan_id,
+        "reason": f"Started {'dry run' if target.dry_run else 'full'} scan on {target.value}"
+    })
+    
+    # 7. Dispatch to Celery Worker
+    task = run_background_scan.delay(target_data, scan_id, user.id)  # Pass user_id for refunds
+    
+    logger.info(f" Scan {scan_id} queued for user {user.email}. Credits: {updated_user.credits} (-{cost})")
+    
+    return {
+        "scan_id": scan_id,
+        "status": "QUEUED",
+        "task_id": task.id,
+        "credits_remaining": updated_user.credits,
+        "cost": cost,
+        "message": f"Scan queued in background. {updated_user.credits} credits remaining."
+    }
 
 @app.get("/scans")
-async def list_scans():
+async def list_scans(
+    user = Depends(get_current_user),  #  CRITICAL-002: Authentication required
+    limit: int = 50
+):
     """
     List all scans sorted by creation date (newest first).
     """
@@ -229,6 +572,31 @@ async def list_scans():
         # Get real-time status from Redis if running
         db_logger = DatabaseLogger(scan.id)
         redis_status_raw = db_logger.redis_client.get(f"scan:{scan.id}:status")
+    List scans for the authenticated user.
+    
+    Security:
+    - Requires authentication
+    - Returns only user's own scans (data isolation)
+    - Admins can see all scans
+    """
+    #  Filter scans by ownership
+    if user.role == "ADMIN":
+        # Admins see all scans
+        user_scans = list(scans_db.values())[:limit]
+    else:
+        # Regular users see only their own scans
+        user_scans = [
+            scan for scan in scans_db.values()
+            if scan.get("user_id") == user.id
+        ][:limit]
+    
+    scan_list = []
+    
+    for scan_data in user_scans:
+        scan_id = scan_data["scan_id"]
+        # Get real-time data from Redis
+        db_logger = DatabaseLogger(scan_id)
+        redis_status_raw = db_logger.redis_client.get(f"scan:{scan_id}:status")
         redis_status = safe_decode(redis_status_raw)
         
         final_status = redis_status if redis_status else scan.status
@@ -252,16 +620,46 @@ async def list_scans():
     return scan_list
 
 @app.get("/scan/{scan_id}")
-async def get_scan_status(scan_id: str):
-    """Get real-time status, logs, and vulnerabilities for a scan."""
-    if scan_id not in scans_db:
+async def get_scan_status(
+    scan_id: str,
+    user = Depends(get_current_user),  #  CRITICAL-002: Authentication required
+    request: Request = None
+):
+    """
+    Get scan status and results.
+    
+    Security:
+    - Requires authentication
+    - Validates UUID format
+    - Enforces ownership check (IDOR protection)
+    """
+    #  Validate UUID
+    try:
+        safe_scan_id = validate_uuid(scan_id, "scan_id")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
+    # Check if scan exists
+    if safe_scan_id not in scans_db:
         raise HTTPException(status_code=404, detail="Scan not found")
-        
+    
+    scan = scans_db[safe_scan_id]
+    
+    #  IDOR Protection: Verify ownership
+    if scan.get("user_id") != user.id and user.role != "ADMIN":
+        ip_address = request.client.host if request else None
+        audit_logger.log_access_denied(
+            user_id=user.id,
+            resource=f"/scan/{scan_id}",
+            reason="User does not own this scan",
+            ip_address=ip_address
+        )
+        raise HTTPException(status_code=403, detail="Access denied: Not your scan")
     # Get real-time status from Redis
-    db_logger = DatabaseLogger(scan_id)
+    db_logger = DatabaseLogger(safe_scan_id)
     
     # Fetch logs from Redis with safe decoding
-    logs_raw = db_logger.redis_client.lrange(f"scan:{scan_id}:logs", 0, -1)
+    logs_raw = db_logger.redis_client.lrange(f"scan:{safe_scan_id}:logs", 0, -1)
     logs = [safe_decode(log) for log in logs_raw] if logs_raw else []
     
     status_raw = db_logger.redis_client.get(f"scan:{scan_id}:status")
@@ -305,18 +703,26 @@ async def verify_target(target_id: str):
     return result
 
 @app.post("/targets/create")
-async def create_target(target: ScanTarget, user_id: str = "mock-user-123"):
+async def create_target(
+    target: ScanTarget,
+    user = Depends(get_current_user)  #  CRITICAL-002 & HIGH-003: Authentication required
+):
     """
-    Create a new target with auto-generated verification token.
+    Create a new target for scanning.
+    
+    Security:
+    - Requires authentication  
+    - Uses authenticated user ID (fixes hardcoded user_id)
     """
     target_id = str(uuid.uuid4())
     verification_token = f"vaptiq-verify={str(uuid.uuid4())[:16]}"
     
+    #   HIGH-003: Use authenticated user ID (not hardcoded)
     mock_targets_db[target_id] = {
         "id": target_id,
         "type": target.type,
         "value": target.value,
-        "user_id": user_id,
+        "user_id": user.id,  #  Use real user ID from JWT
         "verification_token": verification_token,
         "is_verified": False,
         "verified_at": None,
@@ -331,22 +737,79 @@ async def create_target(target: ScanTarget, user_id: str = "mock-user-123"):
     }
 
 @app.get("/targets/{target_id}")
-async def get_target(target_id: str):
+async def get_target(
+    target_id: str,
+    user = Depends(get_current_user)  #  CRITICAL-002: Authentication required
+):
     """
-    Get target details including verification status.
+    Get target details.
+    
+    Security:
+    - Requires authentication
+    - Validates UUID format
+    - Enforces ownership check
     """
-    if target_id not in mock_targets_db:
+    #  Validate UUID
+    try:
+        safe_target_id = validate_uuid(target_id, "target_id")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
+    if safe_target_id not in mock_targets_db:
         raise HTTPException(status_code=404, detail="Target not found")
-    return mock_targets_db[target_id]
+    
+    target = mock_targets_db[safe_target_id]
+    
+    #  IDOR Protection
+    if target.get("user_id") != user.id and user.role != "ADMIN":
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    return target
 
 @app.post("/verify-vulnerability")
-async def verify_vulnerability_endpoint(suspected_vuln: SuspectedVuln):
+@limiter.limit("10/minute")  #  Rate limit: 10 verifications per minute (AI resource-intensive)
+async def verify_vulnerability_endpoint(
+    request: Request,
+    suspected_vuln: SuspectedVuln,
+    user = Depends(get_current_user)  #  CRITICAL-002: Authentication required
+):
     """
-    Manually verify a suspected vulnerability.
-    Useful for testing and re-verification.
+    Manually verify a suspected vulnerability using AI agent.
+    
+    Security:
+    - Requires authentication
+    - Resource-intensive operation (consider rate limiting)
     """
     result = await verifier_agent.verify_vulnerability(suspected_vuln)
     return result
+
+@app.get("/api/user/credits")
+async def get_user_credits(user = Depends(get_current_user)):
+    """
+    Get current user's credit balance and tier information.
+    
+    Returns:
+        - credits: Current credit balance
+        - tier: User subscription tier (FREE, PRO, ENTERPRISE)
+        - monthly_spent: Credits spent this month
+        - monthly_cap: Monthly spending limit for user's tier
+        - monthly_reset_date: When monthly counter resets
+    """
+    tier_limits = {
+        "FREE": {"monthly_cap": 50.0},
+        "PRO": {"monthly_cap": 500.0},
+        "ENTERPRISE": {"monthly_cap": 5000.0}
+    }
+    
+    user_tier_limit = tier_limits.get(user.tier, tier_limits["FREE"])
+    
+    return {
+        "credits": user.credits,
+        "tier": user.tier,
+        "monthly_spent": user.monthlySpent,
+        "monthly_cap": user_tier_limit["monthly_cap"],
+        "monthly_reset_date": user.monthlyResetDate.isoformat()
+    }
 
 @app.get("/")
 async def root():
