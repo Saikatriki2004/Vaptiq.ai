@@ -9,6 +9,8 @@ Architecture:
 import asyncio
 import redis
 import os
+import re
+import json
 import shutil
 from typing import List, Dict, Any
 from celery import chain, chord, group
@@ -416,7 +418,6 @@ def analyze_and_verify(self, results: list, scan_id: str, user_id: str) -> dict:
         cve_id = vuln_dict.get("cve_id") or vuln_dict.get("cveId")
         
         # Also extract from title/description using regex
-        import re
         cve_pattern = r'CVE-\d{4}-\d{4,7}'
         
         if cve_id:
@@ -474,7 +475,6 @@ def analyze_and_verify(self, results: list, scan_id: str, user_id: str) -> dict:
     attack_paths.extend(vuln_type_paths[:5])  # Limit type-based paths
     
     # Save attack paths to Redis
-    import json
     if attack_paths:
         redis_client.set(
             f"scan:{scan_id}:attack_paths",

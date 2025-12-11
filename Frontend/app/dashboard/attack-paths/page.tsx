@@ -140,8 +140,6 @@ export default function AttackPathsPage() {
                         // Combine all attack paths into one visualization
                         const allNodes: Node[] = [];
                         const allEdges: Edge[] = [];
-                        let nodeIndex = 0;
-                        let yOffset = 0;
 
                         paths.forEach((pathResult: any, pathIndex: number) => {
                             const graph = pathResult.attack_path_graph;

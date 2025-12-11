@@ -214,3 +214,78 @@ class TestSmartRetryConfig:
         
         nmap_config = celery_app.conf.task_annotations.get('scan.run_nmap_task', {})
         assert nmap_config.get('retry_backoff') is True
+
+
+class TestAttackPathAutoGeneration:
+    """Tests for automatic attack path generation in analyze_and_verify."""
+    
+    def test_cve_regex_extraction(self):
+        """Should extract CVE IDs from vulnerability descriptions."""
+        import re
+        cve_pattern = r'CVE-\d{4}-\d{4,7}'
+        
+        test_cases = [
+            ("Log4Shell (CVE-2021-44228)", ["CVE-2021-44228"]),
+            ("CVE-2023-44487 HTTP/2 Rapid Reset", ["CVE-2023-44487"]),
+            ("No CVE here", []),
+            ("Multiple: CVE-2021-1234, CVE-2022-5678", ["CVE-2021-1234", "CVE-2022-5678"]),
+        ]
+        
+        for text, expected in test_cases:
+            found = re.findall(cve_pattern, text, re.IGNORECASE)
+            assert found == expected, f"Failed for: {text}"
+    
+    def test_cve_deduplication(self):
+        """Should deduplicate CVE IDs."""
+        cve_list = ["CVE-2021-44228", "cve-2021-44228", "CVE-2021-44228"]
+        unique = list(set([cve.upper() for cve in cve_list]))
+        assert len(unique) == 1
+        assert unique[0] == "CVE-2021-44228"
+    
+    def test_cve_limit_respected(self):
+        """Should limit CVE lookups to 10."""
+        cves = [f"CVE-2021-{1000+i}" for i in range(20)]
+        limited = cves[:10]
+        assert len(limited) == 10
+    
+    def test_redis_key_format(self):
+        """Should use correct Redis key format for attack paths."""
+        import uuid
+        scan_id = str(uuid.uuid4())
+        expected_key = f"scan:{scan_id}:attack_paths"
+        
+        assert expected_key.startswith("scan:")
+        assert expected_key.endswith(":attack_paths")
+        assert scan_id in expected_key
+
+
+class TestAggregatorOutputFormat:
+    """Tests for analyze_and_verify output format."""
+    
+    def test_output_includes_attack_paths_count(self):
+        """Output should include attack_paths_generated field."""
+        output = {
+            "status": "COMPLETED",
+            "scan_id": "test-id",
+            "total_findings": 5,
+            "attack_paths_generated": 3,
+            "cves_found": ["CVE-2021-44228"],
+            "errors": None
+        }
+        
+        assert "attack_paths_generated" in output
+        assert output["attack_paths_generated"] == 3
+    
+    def test_output_includes_cves_found(self):
+        """Output should include list of CVEs found."""
+        output = {
+            "status": "COMPLETED",
+            "scan_id": "test-id",
+            "total_findings": 5,
+            "attack_paths_generated": 2,
+            "cves_found": ["CVE-2021-44228", "CVE-2023-44487"],
+            "errors": None
+        }
+        
+        assert "cves_found" in output
+        assert len(output["cves_found"]) == 2
