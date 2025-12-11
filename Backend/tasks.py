@@ -19,6 +19,7 @@ from .models import ScanTarget, Vulnerability
 from .db_logger import DatabaseLogger
 from .db import db
 from .security import sanitize_target
+from .mitre_engine import get_attack_path_for_vulnerability
 
 # Initialize Redis for the worker to read flags
 redis_client = redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"))
@@ -400,17 +401,100 @@ def analyze_and_verify(self, results: list, scan_id: str, user_id: str) -> dict:
             logger.log("CONSENSUS", f"{status}: {vuln.title}")
     
     # Save results
+    logger.update_phase("GENERATING_ATTACK_PATHS")
+    logger.update_progress(85)
+    logger.save_vulnerabilities([v.dict() for v in verified_findings])
+    
+    # --- AUTO-GENERATE ATTACK PATHS FOR ALL CVEs ---
+    logger.log("ATTACK_PATHS", "Generating attack paths for discovered vulnerabilities...")
+    
+    # Extract CVE IDs from findings
+    cve_patterns = []
+    for vuln in verified_findings:
+        # Look for CVE IDs in title, description, or cve_id field
+        vuln_dict = vuln.dict()
+        cve_id = vuln_dict.get("cve_id") or vuln_dict.get("cveId")
+        
+        # Also extract from title/description using regex
+        import re
+        cve_pattern = r'CVE-\d{4}-\d{4,7}'
+        
+        if cve_id:
+            cve_patterns.append(cve_id)
+        
+        # Search in title
+        title = vuln_dict.get("title", "")
+        found_cves = re.findall(cve_pattern, title, re.IGNORECASE)
+        cve_patterns.extend(found_cves)
+        
+        # Search in description
+        desc = vuln_dict.get("description", "")
+        found_cves = re.findall(cve_pattern, desc, re.IGNORECASE)
+        cve_patterns.extend(found_cves)
+    
+    # Deduplicate CVEs
+    unique_cves = list(set([cve.upper() for cve in cve_patterns]))
+    logger.log("ATTACK_PATHS", f"Found {len(unique_cves)} unique CVE IDs: {unique_cves}")
+    
+    # Generate attack paths for each CVE
+    attack_paths = []
+    for cve_id in unique_cves[:10]:  # Limit to 10 CVEs to avoid rate limiting
+        try:
+            logger.log("ATTACK_PATHS", f"Fetching attack path for {cve_id}...")
+            path_result = asyncio.run(get_attack_path_for_vulnerability(cve_id))
+            attack_paths.append(path_result)
+            logger.log("ATTACK_PATHS", f"✅ Got attack path for {cve_id} (source: {path_result.get('source', 'unknown')})")
+        except Exception as e:
+            logger.log("ATTACK_PATHS", f"⚠️ Failed to get attack path for {cve_id}: {str(e)}")
+            attack_paths.append({
+                "vulnerability_id": cve_id,
+                "source": "Failed",
+                "error": str(e),
+                "attack_path_graph": {"nodes": [], "edges": []},
+                "data_source_status": {"nist_available": False, "mitre_available": False},
+                "severity": "Unknown",
+                "ordered_by_severity": False
+            })
+    
+    # Also generate attack paths based on vulnerability types (not just CVEs)
+    vuln_type_paths = []
+    for vuln in verified_findings:
+        vuln_dict = vuln.dict()
+        vuln_type = vuln_dict.get("type") or vuln_dict.get("title", "")
+        severity = vuln_dict.get("severity", "MEDIUM")
+        
+        # Generate a simplified attack path for non-CVE vulns
+        if vuln_type and not any(vuln_type.upper() in cve.upper() for cve in unique_cves):
+            try:
+                path_result = asyncio.run(get_attack_path_for_vulnerability(vuln_type))
+                vuln_type_paths.append(path_result)
+            except:
+                pass  # Skip failures for type-based lookups
+    
+    attack_paths.extend(vuln_type_paths[:5])  # Limit type-based paths
+    
+    # Save attack paths to Redis
+    import json
+    if attack_paths:
+        redis_client.set(
+            f"scan:{scan_id}:attack_paths",
+            json.dumps(attack_paths),
+            ex=86400 * 7  # Expire in 7 days
+        )
+        logger.log("ATTACK_PATHS", f"Saved {len(attack_paths)} attack paths to Redis")
+    
     logger.update_phase("COMPLETED")
     logger.update_progress(100)
-    logger.save_vulnerabilities([v.dict() for v in verified_findings])
     logger.update_status("COMPLETED")
     
-    logger.log("AGGREGATOR", f"Scan completed. {len(verified_findings)} findings after consensus.")
+    logger.log("AGGREGATOR", f"Scan completed. {len(verified_findings)} findings, {len(attack_paths)} attack paths.")
     
     return {
         "status": "COMPLETED",
         "scan_id": scan_id,
         "total_findings": len(verified_findings),
+        "attack_paths_generated": len(attack_paths),
+        "cves_found": unique_cves,
         "errors": errors if errors else None
     }
 

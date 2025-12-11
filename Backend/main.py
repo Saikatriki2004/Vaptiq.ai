@@ -17,7 +17,7 @@ import json
 import os
 
 from verifier_agent import VerifierAgent, SuspectedVuln
-from mitre_engine import MitreEngine
+from mitre_engine import MitreEngine, get_attack_path_for_vulnerability, display_attack_path
 from reporting import ReportGenerator
 from tasks import run_background_scan
 from agent import ScanTarget
@@ -418,6 +418,94 @@ async def simulate_attack(
     return graph
 
 
+@app.get("/vulnerability/{vuln_id}/attack-path")
+@limiter.limit("10/minute")  # ✅ Rate limit: 10 lookups per minute
+async def get_vulnerability_attack_path(
+    request: Request,
+    vuln_id: str,
+    format: str = "json",
+    user = Depends(get_current_user)  # ✅ CRITICAL-002: Authentication required
+):
+    """
+    Get attack path graph for a specific vulnerability (CVE ID).
+    
+    This endpoint:
+    1. Queries NIST NVD API for vulnerability data
+    2. Maps CWEs to MITRE ATT&CK techniques
+    3. Falls back to AI-generated paths if NIST data unavailable
+    
+    Args:
+        vuln_id: CVE ID (e.g., "CVE-2021-44228") or vulnerability name
+        format: "json" for API data, "text" for visual display
+        
+    Returns:
+        Graphical attack path with nodes and edges
+    """
+    try:
+        # Fetch attack path from NIST/MITRE or generate via AI
+        result = await get_attack_path_for_vulnerability(vuln_id)
+        
+        if format == "text":
+            # Return visual text display
+            return {
+                "vulnerability_id": vuln_id,
+                "display": display_attack_path(result),
+                "source": result.get("source"),
+                "severity": result.get("severity")
+            }
+        
+        # Return structured JSON for frontend visualization
+        return result
+        
+    except Exception as e:
+        logger.error(f"Attack path lookup failed for {vuln_id}: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate attack path: {str(e)}"
+        )
+
+
+@app.post("/vulnerabilities/attack-paths")
+@limiter.limit("5/minute")  # ✅ Rate limit: 5 batch requests per minute (resource-intensive)
+async def get_multiple_attack_paths(
+    request: Request,
+    vuln_ids: list[str],
+    user = Depends(get_current_user)  # ✅ CRITICAL-002: Authentication required
+):
+    """
+    Get attack paths for multiple vulnerabilities in batch.
+    
+    Args:
+        vuln_ids: List of CVE IDs (max 10)
+        
+    Returns:
+        List of attack path results
+    """
+    if len(vuln_ids) > 10:
+        raise HTTPException(
+            status_code=400,
+            detail="Maximum 10 vulnerabilities per batch request"
+        )
+    
+    results = []
+    for vuln_id in vuln_ids:
+        try:
+            result = await get_attack_path_for_vulnerability(vuln_id)
+            results.append(result)
+        except Exception as e:
+            results.append({
+                "vulnerability_id": vuln_id,
+                "error": str(e),
+                "source": None,
+                "attack_path_graph": {"nodes": [], "edges": []},
+                "data_source_status": {"nist_available": False, "mitre_available": False},
+                "severity": "Unknown",
+                "ordered_by_severity": False
+            })
+    
+    return {"results": results, "count": len(results)}
+
+
 @app.post("/scan")
 @limiter.limit("10/minute")  # ✅ Rate limit: 10 scans per minute
 async def start_scan(
@@ -662,6 +750,68 @@ async def get_scan_status(
         "target": scans_db[scan_id]["target"],
         "logs": logs,
         "vulnerabilities": vulnerabilities
+    }
+
+
+@app.get("/scan/{scan_id}/attack-paths")
+async def get_scan_attack_paths(
+    scan_id: str,
+    user = Depends(get_current_user),  # ✅ CRITICAL-002: Authentication required
+    request: Request = None
+):
+    """
+    Get auto-generated attack paths for a completed scan.
+    
+    Attack paths are automatically generated when a scan completes,
+    based on CVE IDs found in vulnerabilities.
+    
+    Returns:
+        List of attack path graphs for each CVE/vulnerability type
+    """
+    # ✅ Validate UUID
+    try:
+        safe_scan_id = validate_uuid(scan_id, "scan_id")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
+    # Check if scan exists
+    if safe_scan_id not in scans_db:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    
+    scan = scans_db[safe_scan_id]
+    
+    # ✅ IDOR Protection: Verify ownership
+    if scan.get("user_id") != user.id and user.role != "ADMIN":
+        ip_address = request.client.host if request else None
+        audit_logger.log_access_denied(
+            user_id=user.id,
+            resource=f"/scan/{scan_id}/attack-paths",
+            reason="User does not own this scan",
+            ip_address=ip_address
+        )
+        raise HTTPException(status_code=403, detail="Access denied: Not your scan")
+    
+    # Get attack paths from Redis
+    db_logger = DatabaseLogger(safe_scan_id)
+    attack_paths_raw = db_logger.redis_client.get(f"scan:{scan_id}:attack_paths")
+    
+    if not attack_paths_raw:
+        return {
+            "scan_id": scan_id,
+            "attack_paths": [],
+            "message": "No attack paths generated yet. Scan may still be in progress."
+        }
+    
+    try:
+        attack_paths_str = safe_decode(attack_paths_raw)
+        attack_paths = json.loads(attack_paths_str)
+    except json.JSONDecodeError:
+        attack_paths = []
+    
+    return {
+        "scan_id": scan_id,
+        "attack_paths": attack_paths,
+        "count": len(attack_paths)
     }
 
 @app.post("/targets/{target_id}/verify")
