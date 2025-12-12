@@ -436,43 +436,76 @@ def analyze_and_verify(self, results: list, scan_id: str, user_id: str) -> dict:
     # Deduplicate CVEs
     unique_cves = list(set([cve.upper() for cve in cve_patterns]))
     logger.log("ATTACK_PATHS", f"Found {len(unique_cves)} unique CVE IDs: {unique_cves}")
-    
-    # Generate attack paths for each CVE
-    attack_paths = []
-    for cve_id in unique_cves[:10]:  # Limit to 10 CVEs to avoid rate limiting
-        try:
+
+    async def fetch_attack_paths_parallel(cves_to_check, vuln_types_to_check):
+        """Helper to fetch multiple attack paths concurrently"""
+        tasks = []
+
+        # Create tasks for CVEs
+        for cve_id in cves_to_check:
             logger.log("ATTACK_PATHS", f"Fetching attack path for {cve_id}...")
-            path_result = asyncio.run(get_attack_path_for_vulnerability(cve_id))
-            attack_paths.append(path_result)
-            logger.log("ATTACK_PATHS", f"✅ Got attack path for {cve_id} (source: {path_result.get('source', 'unknown')})")
-        except Exception as e:
-            logger.log("ATTACK_PATHS", f"⚠️ Failed to get attack path for {cve_id}: {str(e)}")
+            tasks.append(get_attack_path_for_vulnerability(cve_id))
+
+        # Create tasks for vulnerability types
+        for v_type in vuln_types_to_check:
+            tasks.append(get_attack_path_for_vulnerability(v_type))
+
+        if not tasks:
+            return []
+
+        return await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Prepare lists for parallel execution
+    cves_to_process = unique_cves[:10]  # Limit to 10 CVEs
+
+    # Prepare non-CVE vulnerability types
+    vuln_types_to_process = []
+    seen_types = set()
+    for vuln in verified_findings:
+        vuln_dict = vuln.dict()
+        vuln_type = vuln_dict.get("type") or vuln_dict.get("title", "")
+
+        # Only add if it's not covered by a CVE and hasn't been added yet
+        if (vuln_type and
+            not any(vuln_type.upper() in cve.upper() for cve in unique_cves) and
+            vuln_type not in seen_types):
+
+            vuln_types_to_process.append(vuln_type)
+            seen_types.add(vuln_type)
+
+    vuln_types_to_process = vuln_types_to_process[:5]  # Limit type-based paths
+
+    # Execute all requests in parallel
+    logger.log("ATTACK_PATHS", f"Processing {len(cves_to_process)} CVEs and {len(vuln_types_to_process)} types concurrently...")
+
+    all_results = asyncio.run(fetch_attack_paths_parallel(cves_to_process, vuln_types_to_process))
+    
+    attack_paths = []
+
+    # Process results
+    # First batch corresponds to CVEs
+    for i, result in enumerate(all_results[:len(cves_to_process)]):
+        cve_id = cves_to_process[i]
+
+        if isinstance(result, Exception):
+            logger.log("ATTACK_PATHS", f"⚠️ Failed to get attack path for {cve_id}: {str(result)}")
             attack_paths.append({
                 "vulnerability_id": cve_id,
                 "source": "Failed",
-                "error": str(e),
+                "error": str(result),
                 "attack_path_graph": {"nodes": [], "edges": []},
                 "data_source_status": {"nist_available": False, "mitre_available": False},
                 "severity": "Unknown",
                 "ordered_by_severity": False
             })
-    
-    # Also generate attack paths based on vulnerability types (not just CVEs)
-    vuln_type_paths = []
-    for vuln in verified_findings:
-        vuln_dict = vuln.dict()
-        vuln_type = vuln_dict.get("type") or vuln_dict.get("title", "")
-        severity = vuln_dict.get("severity", "MEDIUM")
-        
-        # Generate a simplified attack path for non-CVE vulns
-        if vuln_type and not any(vuln_type.upper() in cve.upper() for cve in unique_cves):
-            try:
-                path_result = asyncio.run(get_attack_path_for_vulnerability(vuln_type))
-                vuln_type_paths.append(path_result)
-            except:
-                pass  # Skip failures for type-based lookups
-    
-    attack_paths.extend(vuln_type_paths[:5])  # Limit type-based paths
+        else:
+            logger.log("ATTACK_PATHS", f"✅ Got attack path for {cve_id} (source: {result.get('source', 'unknown')})")
+            attack_paths.append(result)
+
+    # Second batch corresponds to vuln types
+    for i, result in enumerate(all_results[len(cves_to_process):]):
+        if not isinstance(result, Exception):
+             attack_paths.append(result)
     
     # Save attack paths to Redis
     if attack_paths:
