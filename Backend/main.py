@@ -593,15 +593,53 @@ async def start_scan(
     scan_id = str(uuid.uuid4())
     target_data = target.model_dump(mode='json') if hasattr(target, 'model_dump') else target.dict()
     
-    # Store in mock DB (TODO: Replace with Prisma)
-    scans_db[scan_id] = {
-        "scan_id": scan_id,
+    # Ensure Target exists in Postgres (Crucial for Foreign Key)
+    # If target_id is provided, we verify it exists in DB or sync from mock_targets_db
+    db_target_id = target_id
+
+    if target_id:
+        # Check if exists in DB
+        existing_target = await db.target.find_unique(where={"id": target_id})
+        if not existing_target:
+            # Sync from mock_targets_db if present
+            if target_id in mock_targets_db:
+                mock_t = mock_targets_db[target_id]
+                try:
+                    await db.target.create(data={
+                        "id": target_id,
+                        "type": mock_t.get("type", target.type),
+                        "value": mock_t.get("value", target.value),
+                        "userId": user.id,
+                        "verificationToken": mock_t.get("verification_token", ""),
+                        "isVerified": mock_t.get("is_verified", False),
+                        "verifiedAt": mock_t.get("verified_at")
+                    })
+                    logger.info(f"Synced target {target_id} from mock DB to Postgres")
+                except Exception as e:
+                    # Possible race condition or ID collision
+                    logger.warning(f"Failed to sync target {target_id}: {e}")
+            else:
+                # Should not happen given step 4, but fallback to creating new
+                pass
+    else:
+        # For non-URL targets or ad-hoc scans, create a persistent Target record
+        # This ensures the Scan has a valid relation
+        new_target = await db.target.create(data={
+            "type": target.type,
+            "value": target.value,
+            "userId": user.id,
+            "isVerified": False # IP/API usually don't need DNS verification in this logic
+        })
+        db_target_id = new_target.id
+        target_id = db_target_id # Update for response
+
+    # Store in Prisma DB
+    await db.scan.create(data={
+        "id": scan_id,
+        "targetId": db_target_id,
         "status": "QUEUED",
-        "target": target_data,
-        "target_id": target_id,
-        "user_id": user.id,
-        "created_at": datetime.now()
-    }
+        "createdAt": datetime.now()
+    })
     
     # 6. Log Credit Transaction (Audit Trail)
     await db.credittransaction.create(data={
@@ -858,6 +896,16 @@ async def create_target(
         "verified_at": None,
         "created_at": datetime.now()
     }
+
+    # Persist to Postgres
+    await db.target.create(data={
+        "id": target_id,
+        "type": target.type,
+        "value": target.value,
+        "userId": user.id,
+        "verificationToken": verification_token,
+        "isVerified": False
+    })
     
     return {
         "target_id": target_id,

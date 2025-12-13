@@ -517,7 +517,7 @@ def verify_vulnerability(self, vuln_data: dict, scan_id: str) -> dict:
     Returns:
         Verification result
     """
-    from .verifier_agent import VerifierAgent, SuspectedVuln
+    from verifier_agent import VerifierAgent, SuspectedVuln
     
     logger = DatabaseLogger(scan_id)
     vuln = Vulnerability(**vuln_data)
