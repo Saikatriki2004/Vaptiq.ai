@@ -1,0 +1,155 @@
+# Semgrep Security Scanning
+#
+# Semgrep is known for extremely low false positive rates (~99.9% accuracy)
+# It uses semantic analysis to find real security issues, not just pattern matching
+#
+# Features:
+# - Low false positive rate (99.9%+)
+# - Fast scanning (seconds to minutes)
+# - Supports Python, JavaScript, TypeScript, and 30+ languages
+# - Pro rules for security vulnerabilities
+# - Free for open source projects
+
+name: Semgrep Security Scan
+
+on:
+    push:
+        branches: [main, develop]
+    pull_request:
+        branches: [main, develop]
+    schedule:
+        # Run weekly on Mondays at 4 AM UTC
+        - cron: "0 4 * * 1"
+
+permissions:
+    contents: read
+    security-events: write
+
+jobs:
+    semgrep:
+        name: Semgrep SAST Scan
+        runs-on: ubuntu-latest
+
+        container:
+            image: semgrep/semgrep
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            # Run Semgrep with security-focused rulesets
+            # Using p/security-audit for comprehensive security scanning
+            # Using p/python for Python-specific security rules
+            # Using p/javascript for JavaScript/TypeScript security rules
+            - name: Run Semgrep Security Scan
+              run: |
+                  semgrep scan \
+                    --config "p/security-audit" \
+                    --config "p/python" \
+                    --config "p/javascript" \
+                    --config "p/typescript" \
+                    --config "p/secrets" \
+                    --config "p/owasp-top-ten" \
+                    --sarif \
+                    --output semgrep-results.sarif \
+                    --exclude "tests" \
+                    --exclude "test_*" \
+                    --exclude "*_test.py" \
+                    --exclude "node_modules" \
+                    --exclude ".next" \
+                    --exclude "coverage" \
+                    --exclude "htmlcov" \
+                    --exclude "__pycache__" \
+                    .
+              env:
+                  # Optional: Add Semgrep App token for additional pro rules
+                  # SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+                  SEMGREP_RULES: >-
+                      p/security-audit
+                      p/python
+                      p/javascript
+                      p/typescript
+                      p/secrets
+                      p/owasp-top-ten
+
+            # Upload results to GitHub Security tab
+            - name: Upload Semgrep Results to GitHub Security
+              uses: github/codeql-action/upload-sarif@v3
+              if: always()
+              with:
+                  sarif_file: semgrep-results.sarif
+
+    # Focused Python security scan with additional rules
+    semgrep-python-security:
+        name: Semgrep Python Deep Security Scan
+        runs-on: ubuntu-latest
+
+        container:
+            image: semgrep/semgrep
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Run Python Security Deep Scan
+              run: |
+                  semgrep scan \
+                    --config "p/python" \
+                    --config "p/flask" \
+                    --config "p/django" \
+                    --config "p/fastapi" \
+                    --config "p/python-security-audit" \
+                    --config "p/bandit" \
+                    --config "p/sql-injection" \
+                    --config "p/command-injection" \
+                    --config "p/xss" \
+                    --sarif \
+                    --output semgrep-python.sarif \
+                    --exclude "tests" \
+                    --exclude "test_*" \
+                    --exclude "*_test.py" \
+                    --exclude "__pycache__" \
+                    Backend/
+
+            - name: Upload Python Security Results
+              uses: github/codeql-action/upload-sarif@v3
+              if: always()
+              with:
+                  sarif_file: semgrep-python.sarif
+                  category: semgrep-python
+
+    # Focused JavaScript/TypeScript security scan
+    semgrep-frontend-security:
+        name: Semgrep Frontend Security Scan
+        runs-on: ubuntu-latest
+
+        container:
+            image: semgrep/semgrep
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Run Frontend Security Scan
+              run: |
+                  semgrep scan \
+                    --config "p/javascript" \
+                    --config "p/typescript" \
+                    --config "p/react" \
+                    --config "p/nextjs" \
+                    --config "p/nodejs" \
+                    --config "p/jwt" \
+                    --config "p/xss" \
+                    --sarif \
+                    --output semgrep-frontend.sarif \
+                    --exclude "node_modules" \
+                    --exclude ".next" \
+                    --exclude "e2e" \
+                    Frontend/
+
+            - name: Upload Frontend Security Results
+              uses: github/codeql-action/upload-sarif@v3
+              if: always()
+              with:
+                  sarif_file: semgrep-frontend.sarif
+                  category: semgrep-frontend
