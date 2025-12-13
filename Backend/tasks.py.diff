@@ -1,0 +1,19 @@
+<<<<<<< SEARCH
+        if result.is_confirmed:
+            logger.log("VERIFIER", f"✓ CONFIRMED by AI: {vuln.title}")
+            # Update the vulnerability in Redis
+            # TODO: Implement atomic update to saved vulnerabilities
+            return {"verified": True, "vuln": vuln.title}
+        else:
+=======
+        if result.is_confirmed:
+            logger.log("VERIFIER", f"✓ CONFIRMED by AI: {vuln.title}")
+            # Update the vulnerability in Redis
+            logger.update_vulnerability_status(
+                title=vuln.title,
+                status="CONFIRMED",
+                proof=result.proof_of_exploit
+            )
+            return {"verified": True, "vuln": vuln.title}
+        else:
+>>>>>>> REPLACE
