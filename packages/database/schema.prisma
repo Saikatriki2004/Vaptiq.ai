@@ -88,3 +88,8 @@ model CreditTransaction {
   
   @@index([userId, createdAt]) // For transaction history queries
 }
+
+generator client_py {
+  provider = "prisma-client-py"
+  recursive_type_depth = 5
+}

@@ -70,7 +70,7 @@ class UserRole(str, Enum):
     USER = "USER"
     AUDITOR = "AUDITOR"
 
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
@@ -172,7 +172,7 @@ async def get_current_user(
 
 
 async def get_current_user_optional(
-    credentials: HTTPAuthorizationCredentials | None = Security(security, auto_error=False),
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(security),
     request: Request = None
 ):
     """
