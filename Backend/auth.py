@@ -171,8 +171,11 @@ async def get_current_user(
         raise HTTPException(status_code=401, detail="Authentication failed")
 
 
+# Configure security scheme with auto_error=False
+security_optional = HTTPBearer(auto_error=False)
+
 async def get_current_user_optional(
-    credentials: HTTPAuthorizationCredentials | None = Security(security, auto_error=False),
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(security_optional),
     request: Request = None
 ):
     """

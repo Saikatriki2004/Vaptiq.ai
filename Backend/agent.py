@@ -16,10 +16,10 @@ from typing import List, Optional
 import xmltodict
 
 # Import centralized models
-from .models import ScanTarget, Vulnerability, ScanResult
-from .verifier_agent import VerifierAgent, SuspectedVuln
-from .db_logger import DatabaseLogger
-from .security import sanitize_target  # ✅ CRITICAL-009: Import sanitization
+from models import ScanTarget, Vulnerability, ScanResult
+from verifier_agent import VerifierAgent, SuspectedVuln
+from db_logger import DatabaseLogger
+from security import sanitize_target  # ✅ CRITICAL-009: Import sanitization
 
 TOOL_REGISTRY = {
     "URL": ["run_nmap_scan", "run_zap_spider", "check_ssl_cert"],
