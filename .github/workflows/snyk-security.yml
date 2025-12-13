@@ -1,0 +1,154 @@
+name: Snyk Security Scanning
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    # Run Snyk scans weekly on Sundays at 3 AM UTC
+    - cron: '0 3 * * 0'
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  snyk-code:
+    name: Snyk Code (SAST)
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Run Snyk Code Analysis
+        uses: snyk/actions/node@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          command: code test
+          args: --sarif-file-output=snyk-code.sarif
+      
+      - name: Upload Snyk Code Results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: snyk-code.sarif
+
+  snyk-open-source-frontend:
+    name: Snyk Open Source (Frontend - Node.js)
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      # Setup Node.js environment
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: Frontend/package-lock.json
+      
+      # Install frontend dependencies so Snyk can analyze them
+      - name: Install Frontend Dependencies
+        run: |
+          cd Frontend
+          npm ci
+      
+      - name: Run Snyk Open Source Scan (Frontend)
+        uses: snyk/actions/node@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          command: test
+          args: --file=Frontend/package.json --sarif-file-output=snyk-frontend.sarif
+      
+      - name: Upload Snyk Frontend Results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: snyk-frontend.sarif
+
+  snyk-open-source-backend:
+    name: Snyk Open Source (Backend - Python)
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      # Setup Python environment
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      # Install backend dependencies so Snyk can analyze them
+      - name: Install Backend Dependencies
+        run: |
+          cd Backend
+          pip install -r requirements.txt
+      
+      - name: Run Snyk Open Source Scan (Backend)
+        uses: snyk/actions/python@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          command: test
+          args: --file=Backend/requirements.txt --sarif-file-output=snyk-backend.sarif
+      
+      - name: Upload Snyk Backend Results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: snyk-backend.sarif
+
+  snyk-container:
+    name: Snyk Container Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Build Docker Image
+        run: |
+          docker build -t vaptiq-backend:snyk-scan -f Backend/Dockerfile .
+      
+      - name: Run Snyk Container Scan
+        uses: snyk/actions/docker@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          image: vaptiq-backend:snyk-scan
+          args: --file=Backend/Dockerfile --sarif-file-output=snyk-container.sarif
+      
+      - name: Upload Snyk Container Results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: snyk-container.sarif
+
+  snyk-iac:
+    name: Snyk Infrastructure as Code
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Run Snyk IaC Scan
+        uses: snyk/actions/iac@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --sarif-file-output=snyk-iac.sarif
+      
+      - name: Upload Snyk IaC Results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: snyk-iac.sarif

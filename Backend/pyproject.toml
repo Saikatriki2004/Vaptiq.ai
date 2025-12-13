@@ -1,0 +1,122 @@
+# Vaptiq.ai Backend Configuration
+# This file configures Python tooling for the backend
+
+[project]
+name = "vaptiq-backend"
+version = "1.0.0"
+description = "Vaptiq.ai Security Scanner Backend"
+requires-python = ">=3.10"
+
+# ============================================================================
+# PYLINT CONFIGURATION
+# Suppress noisy warnings that create false positive alerts in code scanning
+# ============================================================================
+
+[tool.pylint.main]
+# Ignore test directories and files
+ignore-paths = [
+    "tests",
+    "test_*",
+    "*_test.py",
+]
+
+# Ignore patterns for generated or third-party code
+ignore-patterns = [
+    "__pycache__",
+    ".pytest_cache",
+]
+
+[tool.pylint.messages_control]
+# Disable noisy rules that generate false positives
+disable = [
+    # Documentation (optional for internal code)
+    "C0114",  # missing-module-docstring
+    "C0115",  # missing-class-docstring
+    "C0116",  # missing-function-docstring
+    
+    # Common in test fixtures and async code
+    "W0611",  # unused-import (often needed for side effects)
+    "W0613",  # unused-argument (common in fixtures/mocks)
+    "W0612",  # unused-variable (sometimes intentional)
+    
+    # Style preferences (not security issues)
+    "C0303",  # trailing-whitespace
+    "C0301",  # line-too-long
+    "C0103",  # invalid-name (test functions often have long names)
+    
+    # Design suggestions (not bugs)
+    "R0201",  # no-self-use / method-could-be-function
+    "R0903",  # too-few-public-methods
+    "R0913",  # too-many-arguments
+    "R0914",  # too-many-locals
+]
+
+[tool.pylint.format]
+# Allow longer lines for readability
+max-line-length = 120
+
+[tool.pylint.design]
+# Reasonable limits for complex security analysis code
+max-args = 10
+max-locals = 20
+
+# ============================================================================
+# BANDIT CONFIGURATION
+# Security-focused linting for Python
+# ============================================================================
+
+[tool.bandit]
+# Exclude test directories - assert statements are expected in tests
+exclude_dirs = [
+    "tests",
+    "test_*",
+]
+
+# Skip certain checks in test files
+skips = [
+    "B101",  # assert_used - Expected in pytest tests
+]
+
+# ============================================================================
+# PYTEST CONFIGURATION
+# ============================================================================
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+asyncio_mode = "auto"
+
+# ============================================================================
+# BLACK FORMATTER (if used)
+# ============================================================================
+
+[tool.black]
+line-length = 120
+target-version = ['py310', 'py311', 'py312']
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+  | __pycache__
+)/
+'''
+
+# ============================================================================
+# ISORT (if used)
+# ============================================================================
+
+[tool.isort]
+profile = "black"
+line_length = 120
+skip_gitignore = true

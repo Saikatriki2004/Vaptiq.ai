@@ -2,12 +2,12 @@ name: Security Testing & SAST
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [main, develop]
   pull_request:
-    branches: [ main, develop ]
+    branches: [main, develop]
   schedule:
     # Run security scans daily at 2 AM UTC
-    - cron: '0 2 * * *'
+    - cron: "0 2 * * *"
 
 # Default permissions - least privilege
 permissions:
@@ -19,28 +19,28 @@ jobs:
   dependency-scan:
     name: Dependency Vulnerability Scan
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-      
+          python-version: "3.11"
+
       - name: Install dependencies
         run: |
           cd Backend
           pip install -r requirements.txt
-      
+
       - name: Run Safety Check
         run: |
           cd Backend
           pip install safety
           safety check --file requirements.txt --json > safety-report.json || true
           cat safety-report.json
-      
+
       - name: Upload Safety Report
         uses: actions/upload-artifact@v4
         with:
@@ -50,28 +50,29 @@ jobs:
   sast-scan:
     name: Static Application Security Testing
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-      
+          python-version: "3.11"
+
       - name: Run Bandit SAST
         run: |
           pip install bandit
-          bandit -r Backend/ -f json -o bandit-report.json || true
-          bandit -r Backend/ -f txt
-      
+          # Exclude tests directory - assert statements generate false positives
+          bandit -r Backend/ --exclude Backend/tests -f json -o bandit-report.json || true
+          bandit -r Backend/ --exclude Backend/tests -f txt
+
       - name: Upload Bandit Report
         uses: actions/upload-artifact@v4
         with:
           name: bandit-report
           path: bandit-report.json
-      
+
       - name: Check for HIGH severity issues
         run: |
           # Fail the build if HIGH or CRITICAL issues found
@@ -85,13 +86,13 @@ jobs:
   secret-scan:
     name: Secret Detection Scan
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Full history for better secret detection
-      
+          fetch-depth: 0 # Full history for better secret detection
+
       - name: TruffleHog Secret Scan
         uses: trufflesecurity/trufflehog@v3.88.0
         with:
@@ -103,7 +104,7 @@ jobs:
   security-tests:
     name: Run Security Test  Suite
     runs-on: ubuntu-latest
-    
+
     services:
       redis:
         image: redis:7
@@ -114,21 +115,21 @@ jobs:
           --health-retries 5
         ports:
           - 6379:6379
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-      
+          python-version: "3.11"
+
       - name: Install dependencies
         run: |
           cd Backend
           pip install -r requirements.txt
-      
+
       - name: Run Security Tests
         env:
           SUPABASE_JWT_SECRET: test-secret-key-minimum-32-characters-long-for-testing-purposes
@@ -137,7 +138,7 @@ jobs:
         run: |
           cd Backend
           pytest tests/security/ -v --tb=short --junit-xml=security-test-results.xml --cov-fail-under=0
-      
+
       - name: Upload Test Results
         uses: actions/upload-artifact@v4
         if: always()
@@ -148,26 +149,26 @@ jobs:
   container-scan:
     name: Container Security Scan
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Build Docker Image
         run: |
           docker build -t vaptiq-backend:test -f Backend/Dockerfile .
-      
+
       - name: Run Trivy Container Scan
         uses: aquasecurity/trivy-action@0.28.0
         with:
-          image-ref: 'vaptiq-backend:test'
-          format: 'sarif'
-          output: 'trivy-results.sarif'
-      
+          image-ref: "vaptiq-backend:test"
+          format: "sarif"
+          output: "trivy-results.sarif"
+
       - name: Upload Trivy Results to GitHub Security
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: 'trivy-results.sarif'
+          sarif_file: "trivy-results.sarif"
 
   codeql-analysis:
     name: CodeQL Security Analysis
@@ -176,17 +177,17 @@ jobs:
       security-events: write
       actions: read
       contents: read
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
           languages: python, javascript-typescript
           queries: security-extended
-      
+
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
 
@@ -195,11 +196,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: [dependency-scan, sast-scan, secret-scan, security-tests]
     if: always()
-    
+
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
-      
+
       - name: Generate Security Summary
         run: |
           echo "# 🔒 Security Scan Summary" >> $GITHUB_STEP_SUMMARY
