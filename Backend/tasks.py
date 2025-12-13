@@ -539,7 +539,11 @@ def verify_vulnerability(self, vuln_data: dict, scan_id: str) -> dict:
         if result.is_confirmed:
             logger.log("VERIFIER", f"✓ CONFIRMED by AI: {vuln.title}")
             # Update the vulnerability in Redis
-            # TODO: Implement atomic update to saved vulnerabilities
+            logger.update_vulnerability_status(
+                title=vuln.title,
+                status="CONFIRMED",
+                proof=result.proof_of_exploit
+            )
             return {"verified": True, "vuln": vuln.title}
         else:
             logger.log("VERIFIER", f"✗ Not confirmed by AI: {vuln.title}")
