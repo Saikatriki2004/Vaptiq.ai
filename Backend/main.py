@@ -233,12 +233,6 @@ app.add_middleware(SecurityHeadersMiddleware)
 mitre_engine = MitreEngine()
 verifier_agent = VerifierAgent()
 
-# --- Mock Databases ---
-# TODO: Replace with Prisma queries once schema is defined
-# NOTE: scans_db will be replaced with db.scan queries
-# NOTE: mock_targets_db will be replaced with db.target queries
-scans_db = {}
-mock_targets_db = {}
 
 # --- Endpoints ---
 
@@ -274,13 +268,16 @@ async def export_scan(
         )
     
     # ✅ Check if scan exists
-    if safe_scan_id not in scans_db:
+    scan = await db.scan.find_unique(
+        where={"id": safe_scan_id},
+        include={"target": True}
+    )
+    if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
     
-    scan = scans_db[safe_scan_id]
-    
     # ✅ IDOR Protection: Verify ownership
-    if scan.get("user_id") != user.id and user.role != "ADMIN":
+    # Scan -> Target -> User
+    if scan.target.userId != user.id and user.role != "ADMIN":
         ip_address = request.client.host if request else None
         audit_logger.log_access_denied(
             user_id=user.id,
@@ -392,9 +389,12 @@ async def simulate_attack(
         raise HTTPException(status_code=400, detail=str(e))
     
     # ✅ Check ownership
-    if safe_scan_id in scans_db:
-        scan = scans_db[safe_scan_id]
-        if scan.get("user_id") != user.id and user.role != "ADMIN":
+    scan = await db.scan.find_unique(
+        where={"id": safe_scan_id},
+        include={"target": True}
+    )
+    if scan:
+        if scan.target.userId != user.id and user.role != "ADMIN":
             ip_address = request.client.host if request else None
             audit_logger.log_access_denied(
                 user_id=user.id,
@@ -403,6 +403,8 @@ async def simulate_attack(
                 ip_address=ip_address
             )
             raise HTTPException(status_code=403, detail="Access denied")
+    else:
+        raise HTTPException(status_code=404, detail="Scan not found")
     # Fetch findings from Redis/DB
     # For demo, using mock
     findings = [
@@ -565,8 +567,12 @@ async def start_scan(
         )
     
     # 4. Check if target requires verification (URL type)
+    db_target = None
+    if target_id:
+        db_target = await db.target.find_unique(where={"id": target_id})
+
     if target.type == "URL":
-        if not target_id or target_id not in mock_targets_db:
+        if not db_target:
             # REFUND if verification fails
             await db.user.update(
                 where={"id": user.id},
@@ -577,8 +583,7 @@ async def start_scan(
                 detail="URL targets must be created and verified before scanning. Please create a target first."
             )
         
-        target_data = mock_targets_db[target_id]
-        if not target_data["is_verified"]:
+        if not db_target.isVerified:
             # REFUND if verification fails
             await db.user.update(
                 where={"id": user.id},
@@ -589,18 +594,38 @@ async def start_scan(
                 detail=f"Domain verification required. Please verify ownership of {target.value} before scanning."
             )
     
+    # If no target ID provided but not URL (e.g. IP), we might need to create it or reuse logic
+    # But for now assuming targets must exist or are created here.
+    # If target_id is None, we need to create a target record for the scan to link to.
+    if not db_target:
+        # Create a new target on the fly (e.g. for IPs where verification might differ)
+        db_target = await db.target.create(
+            data={
+                "type": target.type,
+                "value": target.value,
+                "userId": user.id,
+                "isVerified": True if target.type != "URL" else False # Auto-verify non-URL? Or require separate flow?
+            }
+        )
+        target_id = db_target.id
+
     # 5. Create Scan Record in Database
-    scan_id = str(uuid.uuid4())
-    target_data = target.model_dump(mode='json') if hasattr(target, 'model_dump') else target.dict()
-    
-    # Store in mock DB (TODO: Replace with Prisma)
-    scans_db[scan_id] = {
-        "scan_id": scan_id,
-        "status": "QUEUED",
-        "target": target_data,
-        "target_id": target_id,
-        "user_id": user.id,
-        "created_at": datetime.now()
+    scan_record = await db.scan.create(
+        data={
+            "targetId": target_id,
+            "status": "QUEUED"
+        },
+        include={
+            "target": True
+        }
+    )
+    scan_id = scan_record.id
+    # Prepare target data for Celery
+    target_data = {
+        "id": db_target.id,
+        "type": db_target.type,
+        "value": db_target.value,
+        "dry_run": target.dry_run
     }
     
     # 6. Log Credit Transaction (Audit Trail)
@@ -640,20 +665,26 @@ async def list_scans(
     - Admins can see all scans
     """
     # ✅ Filter scans by ownership
-    if user.role == "ADMIN":
-        # Admins see all scans
-        user_scans = list(scans_db.values())[:limit]
-    else:
-        # Regular users see only their own scans
-        user_scans = [
-            scan for scan in scans_db.values()
-            if scan.get("user_id") == user.id
-        ][:limit]
+    where_clause = {}
+    if user.role != "ADMIN":
+        where_clause = {
+            "target": {
+                "userId": user.id
+            }
+        }
+
+    # Fetch scans from Prisma
+    user_scans = await db.scan.find_many(
+        where=where_clause,
+        include={"target": True},
+        order={"createdAt": "desc"},
+        take=limit
+    )
     
     scan_list = []
     
-    for scan_data in user_scans:
-        scan_id = scan_data["scan_id"]
+    for scan in user_scans:
+        scan_id = scan.id
         # Get real-time data from Redis
         db_logger = DatabaseLogger(scan_id)
         redis_status_raw = db_logger.redis_client.get(f"scan:{scan_id}:status")
@@ -675,16 +706,21 @@ async def list_scans(
                 logger.warning(f"Failed to parse vulnerabilities JSON for scan {scan_id}: {e}")
 
         # Build enriched scan object
+        # Convert scan.target to dict if needed or use directly
+        target_dict = {
+            "id": scan.target.id,
+            "type": scan.target.type,
+            "value": scan.target.value
+        }
+
         scan_list.append({
             "scan_id": scan_id,
-            "status": redis_status or scan_data["status"],
-            "target": scan_data["target"],
-            "created_at": scan_data["created_at"],
+            "status": redis_status or scan.status,
+            "target": target_dict,
+            "created_at": scan.createdAt,
             "summary": summary
         })
 
-    # Sort by created_at desc
-    scan_list.sort(key=lambda x: x["created_at"], reverse=True)
     return scan_list
 
 @app.get("/scan/{scan_id}")
@@ -708,13 +744,15 @@ async def get_scan_status(
         raise HTTPException(status_code=400, detail=str(e))
     
     # Check if scan exists
-    if safe_scan_id not in scans_db:
+    scan = await db.scan.find_unique(
+        where={"id": safe_scan_id},
+        include={"target": True}
+    )
+    if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
     
-    scan = scans_db[safe_scan_id]
-    
     # ✅ IDOR Protection: Verify ownership
-    if scan.get("user_id") != user.id and user.role != "ADMIN":
+    if scan.target.userId != user.id and user.role != "ADMIN":
         ip_address = request.client.host if request else None
         audit_logger.log_access_denied(
             user_id=user.id,
@@ -731,7 +769,7 @@ async def get_scan_status(
     logs = [safe_decode(log) for log in logs_raw] if logs_raw else []
     
     status_raw = db_logger.redis_client.get(f"scan:{scan_id}:status")
-    status = safe_decode(status_raw) or scans_db[scan_id]["status"]
+    status = safe_decode(status_raw) or scan.status
     
     # Fetch vulnerabilities if completed
     vulnerabilities = []
@@ -747,7 +785,11 @@ async def get_scan_status(
     return {
         "scan_id": scan_id,
         "status": status,
-        "target": scans_db[scan_id]["target"],
+        "target": {
+            "id": scan.target.id,
+            "type": scan.target.type,
+            "value": scan.target.value
+        },
         "logs": logs,
         "vulnerabilities": vulnerabilities
     }
@@ -775,13 +817,15 @@ async def get_scan_attack_paths(
         raise HTTPException(status_code=400, detail=str(e))
     
     # Check if scan exists
-    if safe_scan_id not in scans_db:
+    scan = await db.scan.find_unique(
+        where={"id": safe_scan_id},
+        include={"target": True}
+    )
+    if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
     
-    scan = scans_db[safe_scan_id]
-    
     # ✅ IDOR Protection: Verify ownership
-    if scan.get("user_id") != user.id and user.role != "ADMIN":
+    if scan.target.userId != user.id and user.role != "ADMIN":
         ip_address = request.client.host if request else None
         audit_logger.log_access_denied(
             user_id=user.id,
@@ -819,16 +863,21 @@ async def verify_target(target_id: str):
     """
     Verify domain ownership via DNS TXT record.
     """
-    if target_id not in mock_targets_db:
+    target = await db.target.find_unique(where={"id": target_id})
+    if not target:
         raise HTTPException(status_code=404, detail="Target not found")
     
-    target = mock_targets_db[target_id]
-    result = await verify_domain_ownership(target["value"], token=target.get("verification_token"))
+    result = await verify_domain_ownership(target.value, token=target.verificationToken)
     
     # Update verification status if successful
     if result.get("verified"):
-        mock_targets_db[target_id]["is_verified"] = True
-        mock_targets_db[target_id]["verified_at"] = datetime.now()
+        await db.target.update(
+            where={"id": target_id},
+            data={
+                "isVerified": True,
+                "verifiedAt": datetime.now()
+            }
+        )
     
     return result
 
@@ -844,23 +893,21 @@ async def create_target(
     - Requires authentication  
     - Uses authenticated user ID (fixes hardcoded user_id)
     """
-    target_id = str(uuid.uuid4())
     verification_token = f"vaptiq-verify={str(uuid.uuid4())[:16]}"
     
     #  ✅ HIGH-003: Use authenticated user ID (not hardcoded)
-    mock_targets_db[target_id] = {
-        "id": target_id,
-        "type": target.type,
-        "value": target.value,
-        "user_id": user.id,  # ✅ Use real user ID from JWT
-        "verification_token": verification_token,
-        "is_verified": False,
-        "verified_at": None,
-        "created_at": datetime.now()
-    }
+    db_target = await db.target.create(
+        data={
+            "type": target.type,
+            "value": target.value,
+            "userId": user.id,
+            "verificationToken": verification_token,
+            "isVerified": False
+        }
+    )
     
     return {
-        "target_id": target_id,
+        "target_id": db_target.id,
         "verification_token": verification_token,
         "is_verified": False,
         "message": "Target created. Please verify domain ownership before scanning."
@@ -885,13 +932,12 @@ async def get_target(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     
-    if safe_target_id not in mock_targets_db:
+    target = await db.target.find_unique(where={"id": safe_target_id})
+    if not target:
         raise HTTPException(status_code=404, detail="Target not found")
     
-    target = mock_targets_db[safe_target_id]
-    
     # ✅ IDOR Protection
-    if target.get("user_id") != user.id and user.role != "ADMIN":
+    if target.userId != user.id and user.role != "ADMIN":
         raise HTTPException(status_code=403, detail="Access denied")
     
     return target

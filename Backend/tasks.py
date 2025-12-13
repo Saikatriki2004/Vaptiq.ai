@@ -15,13 +15,13 @@ import shutil
 from typing import List, Dict, Any
 from celery import chain, chord, group
 from celery.exceptions import SoftTimeLimitExceeded
-from .celery_config import celery_app
-from .agent import SecurityAgent, run_nmap_scan, run_zap_spider, check_ssl_cert, consensus_check
-from .models import ScanTarget, Vulnerability
-from .db_logger import DatabaseLogger
-from .db import db
-from .security import sanitize_target
-from .mitre_engine import get_attack_path_for_vulnerability
+from celery_config import celery_app
+from agent import SecurityAgent, run_nmap_scan, run_zap_spider, check_ssl_cert, consensus_check
+from models import ScanTarget, Vulnerability
+from db_logger import DatabaseLogger
+from db import db
+from security import sanitize_target
+from mitre_engine import get_attack_path_for_vulnerability
 
 # Initialize Redis for the worker to read flags
 redis_client = redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"))

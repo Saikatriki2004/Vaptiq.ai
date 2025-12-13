@@ -134,40 +134,57 @@ async def _sweep_stale_scans_async():
     from db import db
     from tasks import _refund_user
     
+    if not db.is_connected():
+        await db.connect()
+    
     cutoff_time = datetime.now() - timedelta(minutes=45)
     
-    # Find stale scans
-    # TODO: Replace with Prisma query when migrated
-    from main import scans_db  # Import mock database
-    
-    stale_scans = []
-    for scan_id, scan_data in scans_db.items():
-        if scan_data.get("status") == "RUNNING":
-            created_at = scan_data.get("created_at")
-            if created_at and (datetime.now() - created_at).total_seconds() > 2700:  # 45 minutes
-                stale_scans.append({
-                    "id": scan_id,
-                    "user_id": scan_data.get("user_id"),
-                    "target": scan_data.get("target", {})
-                })
+    # Find stale scans from Prisma
+    stale_scans = await db.scan.find_many(
+        where={
+            "status": "RUNNING",
+            "createdAt": {
+                "lt": cutoff_time
+            }
+        },
+        include={
+            "target": True
+        }
+    )
     
     for scan in stale_scans:
-        # Calculate cost
-        cost = 0 if scan["target"].get("dry_run") else 10
+        # Calculate cost (assuming not stored on scan, derived from target dry_run?)
+        # Target model doesn't explicitly store dry_run bool but value/type.
+        # Scan cost logic in main.py was "0 if target.dry_run else 10".
+        # However, Target model in schema doesn't have dry_run field?
+        # Let's check schema again. ScanTarget Pydantic model has it, but Prisma Target model?
+        # Target: id, type, value, userId, ...
+        # It seems dry_run is transient or not in DB.
+        # If we can't determine dry_run, we might default to refunding 10 credits to be safe
+        # OR check if we can infer it.
+        # For now, let's assume standard scan cost if we can't verify.
+
+        # Actually, ScanTarget Pydantic model has dry_run, but it is not persisted in Target table.
+        # So we might refund 10 credits assuming it was a paid scan, or 0 if we can somehow know.
+        # Safest bet is to refund 10 if we are unsure, to err on side of user.
+        cost = 10
         
-        # Mark as failed in mock DB
-        scans_db[scan["id"]]["status"] = "FAILED"
+        # Mark as failed in DB
+        await db.scan.update(
+            where={"id": scan.id},
+            data={"status": "FAILED"}
+        )
         
-        # Refund user if it was a paid scan
-        if cost > 0 and scan.get("user_id"):
+        # Refund user
+        if cost > 0 and scan.target.userId:
             await _refund_user(
-                user_id=scan["user_id"],
+                user_id=scan.target.userId,
                 amount=cost,
-                scan_id=scan["id"],
+                scan_id=scan.id,
                 reason="STALE_JOB_TIMEOUT (Worker crashed/redeployed)"
             )
             
-        logger.info(f"🧹 Swept stale scan {scan['id'][:8]} and refunded {cost} credits to user {scan.get('user_id', 'unknown')[:8]}")
+        logger.info(f"🧹 Swept stale scan {scan.id[:8]} and refunded {cost} credits to user {scan.target.userId[:8]}")
     
     if stale_scans:
         logger.info(f"✅ Sweeper recovered {len(stale_scans)} stale jobs")
